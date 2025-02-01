@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "baseUrl": "./",
+    "paths": {
+      "@Controllers": ["src/controllers"],
+      "@Controllers/*": ["src/controllers/*"],
+      "@Routes": ["src/routes"],
+      "@Routes/*": ["src/routes/*"],
+      "@Core": ["src/core"],
+      "@Core/*": ["src/core/*"],
+      "@Interfaces": ["src/interfaces"],
+      "@Interfaces/*": ["src/interfaces/*"],
+      "@gateways": ["src/gateways"],
+      "@gateways/*": ["src/gateways/*"],
+      "@services": ["src/services"],
+      "@services/*": ["src/services/*"],
+      "@Enums": ["src/enums"],
+      "@Enums/*": ["src/enums/*"],
+      "@utils": ["src/utils"],
+      "@utils/*": ["src/utils/*"]
+    }
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
