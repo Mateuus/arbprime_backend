@@ -1,5 +1,5 @@
 import Redis from "ioredis";
-import { logger, LoggerClass } from "@Core";
+import { logger, LoggerClass } from "@Core/logger";
 
 const redisServer = new Redis({
   host: "127.0.0.1",

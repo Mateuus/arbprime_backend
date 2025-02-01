@@ -1,3 +1,4 @@
+import 'module-alias/register';
 import { logger, LoggerClass } from "@Core/logger";
 import { checkRedisConnection } from "@Core/redis";
 import { startServer } from "@Core/server";

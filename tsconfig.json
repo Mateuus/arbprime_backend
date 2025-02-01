@@ -8,14 +8,15 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "baseUrl": "./",
+    "baseUrl": ".",
+    "moduleResolution": "node",
     "paths": {
       "@Controllers": ["src/controllers"],
       "@Controllers/*": ["src/controllers/*"],
       "@Routes": ["src/routes"],
       "@Routes/*": ["src/routes/*"],
-      "@Core": ["src/core"],
       "@Core/*": ["src/core/*"],
+      "@Core": ["src/core"],
       "@Interfaces": ["src/interfaces"],
       "@Interfaces/*": ["src/interfaces/*"],
       "@gateways": ["src/gateways"],
@@ -28,6 +29,6 @@
       "@utils/*": ["src/utils/*"]
     }
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "include": ["src"],
+  "exclude": ["node_modules"]
 }

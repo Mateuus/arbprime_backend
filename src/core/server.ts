@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import dotenv from "dotenv";
-import { logger, LoggerClass } from "@Core";
+import { logger, LoggerClass } from "@Core/logger";
 import routes from "@Routes";
 
 // Carregar variáveis de ambiente
