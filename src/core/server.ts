@@ -10,7 +10,7 @@ dotenv.config();
 
 // Criar a instância do Express
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT_API = process.env.PORT_API ? parseInt(process.env.PORT_API) : 3000;
 
 // Configurar Middlewares
 app.use(cors());
@@ -23,12 +23,12 @@ app.use("/", routes);
 
 // Iniciar o Servidor
 export const startServer = () => {
-  app.listen(PORT, () => {
+  app.listen(PORT_API, () => {
     logger.log(
-      `🚀 Servidor Express rodando na porta ${PORT}`,
+      `🚀 Servidor Express rodando na porta ${PORT_API}`,
       LoggerClass.LogCategory.Server,
-      "API",
-      LoggerClass.LogColor.Green
+      "[Express]",
+      LoggerClass.LogColor.Red
     );
   });
 };

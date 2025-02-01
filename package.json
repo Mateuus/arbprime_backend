@@ -27,8 +27,8 @@
     "@Routes": "./dist/routes",
     "@Core": "./dist/core",
     "@Interfaces": "./dist/interfaces",
-    "@gateways": "./dist/gateways",
-    "@services": "./dist/services",
+    "@Gateways": "./dist/gateways",
+    "@Services": "./dist/services",
     "@Enums": "./dist/enums",
     "@utils": "./dist/utils"
   },
