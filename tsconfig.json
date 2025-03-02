@@ -5,12 +5,17 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "strict": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
+    "strictPropertyInitialization": true,
     "baseUrl": ".",
     "moduleResolution": "node",
     "paths": {
+      "@Entities": ["src/database/entities"],
+      "@Database": ["src/database/data-source"],
       "@Controllers": ["src/controllers"],
       "@Controllers/*": ["src/controllers/*"],
       "@Routes": ["src/routes"],
@@ -29,6 +34,6 @@
       "@utils/*": ["src/utils/*"]
     }
   },
-  "include": ["src"],
+  "include": ["src/**/*.ts", "src/types/**/*.d.ts"],
   "exclude": ["node_modules"]
 }

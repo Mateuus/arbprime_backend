@@ -1,9 +1,16 @@
 import Redis from "ioredis";
 import { logger, LoggerClass } from "@Core/logger";
+import dotenv from "dotenv";
+
+// Carregar variáveis de ambiente
+dotenv.config();
+
+const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
+const REDIS_PORT = process.env.REDIS_PORT ? parseInt(process.env.REDIS_PORT) : 6379;
 
 const redisClient = new Redis({
-  host: "127.0.0.1",
-  port: 6379
+  host: REDIS_HOST,
+  port: REDIS_PORT
 });
 
 // Evento de erro no Redis

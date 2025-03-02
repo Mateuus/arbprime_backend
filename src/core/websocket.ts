@@ -1,6 +1,6 @@
 import WebSocket, { WebSocketServer } from "ws";
 import { logger, LoggerClass } from "@Core/logger";
-import { getArbitragePairs } from "@utils/functions";
+import { getArbitragePairs, calculateArbitrage } from "@utils/functions";
 import dotenv from "dotenv";
 
 // Carregar variáveis de ambiente
@@ -16,12 +16,14 @@ export const wss = new WebSocketServer({ port: PORT_WSS });
  Este conjunto mantém as conexões WebSocket únicas dos clientes que optaram por receber atualizações periódicas.
 */
 const arbitrageClients = new Set<WebSocket>();
+const monitorClients = new Map<WebSocket, { symbol: string, spot: string, future: string }>();
 
 export function startWebSocketServer() {
     logger.log(`📡 Servidor WebSocket iniciado na porta ${PORT_WSS}`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
 
     wss.on("connection", (ws,req) => {
  
+        /*
         // verifcar se o cliente está autenticado
         const token = req.url?.split("token=")[1];
 
@@ -38,12 +40,12 @@ export function startWebSocketServer() {
             ws.close(4002, "Token inválido.");
             logger.log("🔴 Conexão recusada: Token inválido.", LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
             return;
-        }
+        }*/
 
         // Se o cliente for autenticado com sucesso, podemos prosseguir
         logger.log(`🟢 Cliente conectado ao WebSocket`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
 
-        ws.on("message", (message) => {
+        ws.on("message", async (message) => {
             try {
                 const payload = JSON.parse(message.toString());
                 
@@ -59,7 +61,35 @@ export function startWebSocketServer() {
                         if (arbitrageClients.has(ws)) {
                             arbitrageClients.delete(ws);
                             logger.log(`⏹️ Cliente removido das atualizações automáticas de arbitrage_pairs. Total de clientes: ${arbitrageClients.size}`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
+                        } else {
+                            const marketPairs = await getArbitragePairs(0, 100);
+                            if (marketPairs) {
+                                ws.send(JSON.stringify({ success: true, data: marketPairs }));
+                            } else {
+                                ws.send(JSON.stringify({ success: false, message: 'Nenhum dado encontrado no Redis.' }));
+                            }
                         }
+                    }
+                }
+                
+                // Monitoramento contínuo de arbitragem para um par específico
+                if (payload.method === "monitor_pairs") {
+                    if (payload.symbol && payload.spot && payload.future) {
+                        monitorClients.set(ws, {
+                            symbol: payload.symbol,
+                            spot: payload.spot,
+                            future: payload.future
+                        });
+                        logger.log(`🔄 Cliente iniciou monitoramento do par ${payload.symbol}`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
+                    } else {
+                        ws.send(JSON.stringify({ success: false, message: "Parâmetros inválidos." }));
+                    }
+                }
+
+                if (payload.method === "stop") {
+                    if (arbitrageClients.has(ws)) {
+                        arbitrageClients.delete(ws);
+                        logger.log(`⏹️ Cliente removido das atualizações automáticas de arbitrage_pairs. Total de clientes: ${arbitrageClients.size}`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
                     }
                 }
             } catch (error) {
@@ -69,12 +99,9 @@ export function startWebSocketServer() {
         });
 
         ws.on("close", () => {
-            if (arbitrageClients.has(ws)) {
-                arbitrageClients.delete(ws);
-                logger.log(`🔴 Cliente desconectado do WebSocket e removido. Total de clientes: ${arbitrageClients.size}`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
-            } else {
-                logger.log("🔴 Cliente desconectado do WebSocket.", LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
-            }
+            monitorClients.delete(ws);
+            arbitrageClients.delete(ws);
+            logger.log(`🔴 Cliente desconectado do WebSocket`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
         });
     });
 
@@ -89,6 +116,16 @@ export function startWebSocketServer() {
                         client.send(message);
                     }
                 });
+            }
+        }
+    }, 1000);
+
+    // Monitoramento contínuo de pares específicos
+    setInterval(async () => {
+        for (const [client, { symbol, spot, future }] of monitorClients.entries()) {
+            const arbitrageData = await calculateArbitrage(symbol, spot, future);
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(JSON.stringify({ success: true, data: arbitrageData }));
             }
         }
     }, 1000);

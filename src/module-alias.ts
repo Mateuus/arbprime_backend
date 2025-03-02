@@ -3,6 +3,8 @@ import path from "path";
 
 // Registrar os aliases para apontar para a pasta `dist/`
 moduleAlias.addAliases({
+  "@Entities": path.resolve(__dirname, "database/entities"),
+  "@Database": path.resolve(__dirname, "database/data-source"),
   "@Controllers": path.resolve(__dirname, "controllers"),
   "@Routes": path.resolve(__dirname, "routes"),
   "@Core": path.resolve(__dirname, "core"),
