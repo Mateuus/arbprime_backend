@@ -1,6 +1,6 @@
 import WebSocket, { WebSocketServer } from "ws";
 import { logger, LoggerClass } from "@Core/logger";
-import { getArbitragePairs, calculateArbitrage } from "@utils/functions";
+import { getArbitragePairs, calculateArbitrage, getArbitrageBet } from "@utils/functions";
 import dotenv from "dotenv";
 
 // Carregar variáveis de ambiente
@@ -17,6 +17,8 @@ export const wss = new WebSocketServer({ port: PORT_WSS });
 */
 const arbitrageClients = new Set<WebSocket>();
 const monitorClients = new Map<WebSocket, { symbol: string, spot: string, future: string }>();
+
+const arbitrageBetClients = new Set<WebSocket>();
 
 export function startWebSocketServer() {
     logger.log(`📡 Servidor WebSocket iniciado na porta ${PORT_WSS}`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
@@ -48,6 +50,29 @@ export function startWebSocketServer() {
         ws.on("message", async (message) => {
             try {
                 const payload = JSON.parse(message.toString());
+
+                if (payload.method === "arbitrage_betting") {
+                    if (payload.autoUpdate) {
+                        if (!arbitrageBetClients.has(ws)) {
+                            arbitrageBetClients.add(ws);
+                            logger.log(`🔄 Cliente adicionado para receber atualizações automáticas de arbitrage_betting. Total de clientes: ${arbitrageBetClients.size}`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
+                        } else {
+                            logger.log("🔁 Cliente já está registrado para receber atualizações automáticas de arbitrage_pairs.", LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
+                        }
+                    } else {
+                        if (arbitrageBetClients.has(ws)) {
+                            arbitrageBetClients.delete(ws);
+                            logger.log(`⏹️ Cliente removido das atualizações automáticas de arbitrage_pairs. Total de clientes: ${arbitrageBetClients.size}`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
+                        } else {
+                            const events = await getArbitrageBet();
+                            if (events) {
+                                ws.send(JSON.stringify({ success: true, data: events }));
+                            } else {
+                                ws.send(JSON.stringify({ success: false, message: 'Nenhum dado encontrado no Redis.' }));
+                            }
+                        }
+                    }
+                }
                 
                 if (payload.method === "arbitrage_pairs") {
                     if (payload.autoUpdate) {
@@ -91,6 +116,10 @@ export function startWebSocketServer() {
                         arbitrageClients.delete(ws);
                         logger.log(`⏹️ Cliente removido das atualizações automáticas de arbitrage_pairs. Total de clientes: ${arbitrageClients.size}`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
                     }
+                    if (arbitrageBetClients.has(ws)) {
+                        arbitrageBetClients.delete(ws);
+                        logger.log(`⏹️ Cliente removido das atualizações automáticas de arbitrage_betting. Total de clientes: ${arbitrageBetClients.size}`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
+                    }
                 }
             } catch (error) {
                 logger.error("❌ Erro ao processar mensagem do WebSocket.", LoggerClass.LogCategory.Server, "WebSocket");
@@ -101,11 +130,26 @@ export function startWebSocketServer() {
         ws.on("close", () => {
             monitorClients.delete(ws);
             arbitrageClients.delete(ws);
+            arbitrageBetClients.delete(ws);
             logger.log(`🔴 Cliente desconectado do WebSocket`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
         });
     });
 
     // Atualizar arbitrage_pairs automaticamente a cada 1 segundo
+    setInterval(async () => {
+        if (arbitrageBetClients.size > 0) {
+            const events = await getArbitrageBet();
+            if (events) {
+                const message = JSON.stringify({ success: true, data: events });
+                arbitrageBetClients.forEach((client) => {
+                    if (client.readyState === WebSocket.OPEN) {
+                        client.send(message);
+                    }
+                });
+            }
+        }
+    }, 5000);
+
     setInterval(async () => {
         if (arbitrageClients.size > 0) {
             const marketPairs = await getArbitragePairs(0, 100);

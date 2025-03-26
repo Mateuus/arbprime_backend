@@ -172,3 +172,20 @@ export const getWorkerPath = (fileName: string): string => {
         throw new Error(`Arquivo ${fileName} não encontrado em .ts ou .js`);
     }
 };
+
+/**
+ * Busca todos os pares de arbitragem armazenados no Redis e filtra por percentual de lucro.
+ *
+ * @param {number} minProfitPercentage - O percentual mínimo de lucro para filtrar os pares (padrão: 0).
+ * @param {number} maxProfitPercentage - O percentual máximo de lucro para filtrar os pares (padrão: 100).
+ * @returns {Promise<any[]>} - Retorna uma lista de pares de arbitragem ordenados do maior para o menor lucro.
+ */
+export async function getArbitrageBet(): Promise<any[]> {
+    try {
+        const data = await redisClient.hgetall('ArbBetting:ArbitrageList');
+        return Object.entries(data);
+    } catch (error) {
+        console.error(`Erro ao buscar e filtrar arbitrage_pairs do Redis: ${error}`);
+        return [];
+    }
+}
