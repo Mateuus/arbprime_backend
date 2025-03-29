@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: "arbcrypto_backend",
+      name: "arbprime_backend",
       script: "dist/index.js", // Ponto de entrada correto
       node_args: "-r module-alias/register", // Suporte para module-alias
       exec_mode: "fork", // Executar como um processo único
