@@ -55,7 +55,7 @@ async function initializeServices() {
 
         logger.log("📡 Iniciando o servidor WebSocket...", LoggerClass.LogCategory.Server, "[ROOT]", LoggerClass.LogColor.White);
         startWebSocketServer();
-        await eventHandlerCreate(); // Cria as tarefas do EventHandler
+        //await eventHandlerCreate(); // Cria as tarefas do EventHandler
     } catch (error) {
         logger.error(`❌ Erro crítico na inicialização: ${(error as Error).message}`, LoggerClass.LogCategory.Server, "[ROOT]");
         process.exit(1); // Encerra o sistema em caso de erro
