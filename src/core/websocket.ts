@@ -1,6 +1,6 @@
 import WebSocket, { WebSocketServer } from "ws";
 import { logger, LoggerClass } from "@Core/logger";
-import { getArbitragePairs, calculateArbitrage, getArbitrageBet } from "@utils/functions";
+import { getArbitragePairs, calculateArbitrage, getFormattedSurebets } from "@utils/functions";
 import dotenv from "dotenv";
 
 // Carregar variáveis de ambiente
@@ -24,26 +24,6 @@ export function startWebSocketServer() {
     logger.log(`📡 Servidor WebSocket iniciado na porta ${PORT_WSS}`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
 
     wss.on("connection", (ws,req) => {
- 
-        /*
-        // verifcar se o cliente está autenticado
-        const token = req.url?.split("token=")[1];
-
-        if (!token) {
-            ws.close(4001, "Token de autenticação não fornecido.");
-            logger.log("🔴 Conexão recusada: Token não fornecido.", LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
-            return;
-        }
-
-        try {
-            // TEMP
-            logger.log(`🟢 Cliente autenticado (teste). Usuário: ${token }`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
-        } catch (error) {
-            ws.close(4002, "Token inválido.");
-            logger.log("🔴 Conexão recusada: Token inválido.", LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
-            return;
-        }*/
-
         // Se o cliente for autenticado com sucesso, podemos prosseguir
         logger.log(`🟢 Cliente conectado ao WebSocket`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
 
@@ -64,11 +44,11 @@ export function startWebSocketServer() {
                             arbitrageBetClients.delete(ws);
                             logger.log(`⏹️ Cliente removido das atualizações automáticas de arbitrage_pairs. Total de clientes: ${arbitrageBetClients.size}`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
                         } else {
-                            const events = await getArbitrageBet();
+                            const events = await getFormattedSurebets();
                             if (events) {
-                                ws.send(JSON.stringify({ success: true, data: events }));
+                                ws.send(JSON.stringify({ success: true, method: payload.method,  data: events }));
                             } else {
-                                ws.send(JSON.stringify({ success: false, message: 'Nenhum dado encontrado no Redis.' }));
+                                ws.send(JSON.stringify({ success: false, method: payload.method, message: 'Nenhum dado encontrado no Redis.' }));
                             }
                         }
                     }
@@ -89,9 +69,9 @@ export function startWebSocketServer() {
                         } else {
                             const marketPairs = await getArbitragePairs(0, 100);
                             if (marketPairs) {
-                                ws.send(JSON.stringify({ success: true, data: marketPairs }));
+                                ws.send(JSON.stringify({ success: true, method: payload.method, data: marketPairs }));
                             } else {
-                                ws.send(JSON.stringify({ success: false, message: 'Nenhum dado encontrado no Redis.' }));
+                                ws.send(JSON.stringify({ success: false, method: payload.method, message: 'Nenhum dado encontrado no Redis.' }));
                             }
                         }
                     }
@@ -107,7 +87,7 @@ export function startWebSocketServer() {
                         });
                         logger.log(`🔄 Cliente iniciou monitoramento do par ${payload.symbol}`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
                     } else {
-                        ws.send(JSON.stringify({ success: false, message: "Parâmetros inválidos." }));
+                        ws.send(JSON.stringify({ success: false, method: payload.method, message: "Parâmetros inválidos." }));
                     }
                 }
 
@@ -138,9 +118,9 @@ export function startWebSocketServer() {
     // Atualizar arbitrage_pairs automaticamente a cada 1 segundo
     setInterval(async () => {
         if (arbitrageBetClients.size > 0) {
-            const events = await getArbitrageBet();
+            const events = await getFormattedSurebets();
             if (events) {
-                const message = JSON.stringify({ success: true, data: events });
+                const message = JSON.stringify({ success: true, method: "arbitrage_betting", data: events });
                 arbitrageBetClients.forEach((client) => {
                     if (client.readyState === WebSocket.OPEN) {
                         client.send(message);
@@ -154,7 +134,7 @@ export function startWebSocketServer() {
         if (arbitrageClients.size > 0) {
             const marketPairs = await getArbitragePairs(0, 100);
             if (marketPairs) {
-                const message = JSON.stringify({ success: true, data: marketPairs });
+                const message = JSON.stringify({ success: true, method: "arbitrage_pairs", data: marketPairs });
                 arbitrageClients.forEach((client) => {
                     if (client.readyState === WebSocket.OPEN) {
                         client.send(message);
@@ -169,7 +149,7 @@ export function startWebSocketServer() {
         for (const [client, { symbol, spot, future }] of monitorClients.entries()) {
             const arbitrageData = await calculateArbitrage(symbol, spot, future);
             if (client.readyState === WebSocket.OPEN) {
-                client.send(JSON.stringify({ success: true, data: arbitrageData }));
+                client.send(JSON.stringify({ success: true, method: "monitor_pairs", data: arbitrageData }));
             }
         }
     }, 1000);

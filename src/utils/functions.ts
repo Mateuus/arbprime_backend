@@ -1,6 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import redisClient from '@Core/redis';
+import { SurebetData } from '@Interfaces';
 
 /**
  * Obtém as taxas de uma exchange específica.
@@ -180,12 +181,29 @@ export const getWorkerPath = (fileName: string): string => {
  * @param {number} maxProfitPercentage - O percentual máximo de lucro para filtrar os pares (padrão: 100).
  * @returns {Promise<any[]>} - Retorna uma lista de pares de arbitragem ordenados do maior para o menor lucro.
  */
-export async function getArbitrageBet(): Promise<any[]> {
+export async function getFormattedSurebets(): Promise<SurebetData[]> {
     try {
-        const data = await redisClient.hgetall('ArbBetting:ArbitrageList');
-        return Object.entries(data);
+      const raw = await redisClient.hgetall('ArbBetting:ArbitrageList');
+      const entries = Object.entries(raw);
+  
+      const parsed: SurebetData[] = entries.map(([id, json]) => {
+        const data = JSON.parse(json) as SurebetData;
+  
+        // Ordena os surebets por profitMargin DESC
+        data.surebets.sort((a, b) => b.profitMargin - a.profitMargin);
+  
+        // Define o melhor profit do evento
+        data.bestProfit = data.surebets[0]?.profitMargin || 0;
+  
+        return data;
+      });
+  
+      // Ordena os eventos com base no melhor profitMargin
+      parsed.sort((a, b) => (b.bestProfit || 0) - (a.bestProfit || 0));
+  
+      return parsed;
     } catch (error) {
-        console.error(`Erro ao buscar e filtrar arbitrage_pairs do Redis: ${error}`);
-        return [];
+      console.error('Erro ao processar surebets:', error);
+      return [];
     }
-}
+  }
