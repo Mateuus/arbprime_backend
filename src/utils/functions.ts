@@ -1,7 +1,13 @@
 import path from 'path';
 import fs from 'fs';
+import dotenv from "dotenv";
 import redisClient from '@Core/redis';
-import { SurebetData } from '@Interfaces';
+import { SurebetData, UserData } from '@Interfaces';
+dotenv.config();
+
+const ARB_FOLDER_BASE_RKEY = process.env.ARB_FOLDER_BASE_RKEY || 'ArbBetting';
+const ARB_LIST_PREMATCH_HASH_RKEY = process.env.ARB_LIST_PREMATCH_HASH_RKEY || 'ArbitrageListPrematch';
+const ARB_LIST_LIVE_HASH_RKEY = process.env.ARB_LIST_LIVE_HASH_RKEY || 'ArbitrageListLive';
 
 /**
  * Obtém as taxas de uma exchange específica.
@@ -181,9 +187,10 @@ export const getWorkerPath = (fileName: string): string => {
  * @param {number} maxProfitPercentage - O percentual máximo de lucro para filtrar os pares (padrão: 100).
  * @returns {Promise<any[]>} - Retorna uma lista de pares de arbitragem ordenados do maior para o menor lucro.
  */
-export async function getFormattedSurebets(type: string, options?: Record<string, unknown>): Promise<SurebetData[]> {
+export async function getFormattedSurebets(type: string, options?: Record<string, unknown>, user?: UserData | null): Promise<SurebetData[]> {
     try {
-      const raw = await redisClient.hgetall('ArbBetting:ArbitrageList');
+      const ARB_LIST_RKEY = type === 'live' ? ARB_LIST_LIVE_HASH_RKEY : ARB_LIST_PREMATCH_HASH_RKEY;
+      const raw = await redisClient.hgetall(`${ARB_FOLDER_BASE_RKEY}:${ARB_LIST_RKEY}`);
       const entries = Object.entries(raw);
   
       const parsed: SurebetData[] = entries.map(([id, json]) => {
