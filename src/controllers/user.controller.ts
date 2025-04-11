@@ -127,9 +127,9 @@ export const logoutAccount = async (req: Request, res: Response) => {
       res.clearCookie('MToken', { 
         path: '/', 
         httpOnly: true, 
-        //secure: process.env.NODE_ENV === 'production',
+        secure: process.env.NODE_ENV === 'production',
         sameSite: 'none',
-        //domain: '.bdjcoins.com'
+        domain: '.arbprime.pro'
       });
 
     res.status(200).json(createResponse(1, 'translations.logoutSuccessful',  {} ));
