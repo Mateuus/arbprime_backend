@@ -1,6 +1,7 @@
 import "./module-alias";
 import cron from 'node-cron';
 import path from 'path';
+import dotenv from "dotenv";
 import { logger, LoggerClass } from "@Core/logger";
 import { checkRedisConnection } from "@Core/redis";
 import { startServer } from "@Core/server";
@@ -9,6 +10,8 @@ import { LogCategory, LogColor } from '@Enums';
 import EventHandler from "./schedulers/eventHandler";
 import { AppDataSource } from "./database/data-source";
 import { getWorkerPath } from "@utils/functions";
+
+dotenv.config();
 
 // Inicializa o EventHandler
 const eventHandler = new EventHandler();
@@ -55,7 +58,12 @@ async function initializeServices() {
 
         logger.log("📡 Iniciando o servidor WebSocket...", LoggerClass.LogCategory.Server, "[ROOT]", LoggerClass.LogColor.White);
         startWebSocketServer();
-        //await eventHandlerCreate(); // Cria as tarefas do EventHandler
+        if (process.env.NODE_ENV === 'production') {
+            await eventHandlerCreate(); // Executa apenas em produção
+            logger.log("🛠️ EventHandler carregado para ambiente de produção", LoggerClass.LogCategory.Server, "[ROOT]", LoggerClass.LogColor.Green);
+          } else {
+            logger.log("⚠️ EventHandler ignorado (não está em produção)", LoggerClass.LogCategory.Server, "[ROOT]", LoggerClass.LogColor.White);
+          }
     } catch (error) {
         logger.error(`❌ Erro crítico na inicialização: ${(error as Error).message}`, LoggerClass.LogCategory.Server, "[ROOT]");
         process.exit(1); // Encerra o sistema em caso de erro
