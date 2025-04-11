@@ -8,4 +8,5 @@ export interface UserResponseDTO {
     username: string;
     email: string;
     role: string;
+    token: string;
 }

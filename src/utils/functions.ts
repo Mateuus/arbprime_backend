@@ -181,7 +181,7 @@ export const getWorkerPath = (fileName: string): string => {
  * @param {number} maxProfitPercentage - O percentual máximo de lucro para filtrar os pares (padrão: 100).
  * @returns {Promise<any[]>} - Retorna uma lista de pares de arbitragem ordenados do maior para o menor lucro.
  */
-export async function getFormattedSurebets(): Promise<SurebetData[]> {
+export async function getFormattedSurebets(type: string, options?: Record<string, unknown>): Promise<SurebetData[]> {
     try {
       const raw = await redisClient.hgetall('ArbBetting:ArbitrageList');
       const entries = Object.entries(raw);
@@ -206,4 +206,4 @@ export async function getFormattedSurebets(): Promise<SurebetData[]> {
       console.error('Erro ao processar surebets:', error);
       return [];
     }
-  }
+}

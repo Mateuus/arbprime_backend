@@ -22,7 +22,7 @@ export const checkAuth = (req: Request, res: Response, next: NextFunction) => {
     }
 
     const decodedToken = jwt.verify(token, jwtSecret) as { id: string; email: string; role: string };
-    req.userData = { userId: decodedToken.id, email: decodedToken.email, role: decodedToken.role };
+    req.userData = { userId: decodedToken.id, email: decodedToken.email, role: decodedToken.role, token: token };
     next();
   } catch (error) {
    res.status(401).json(createResponse(0, "Invalid authentication token", []));

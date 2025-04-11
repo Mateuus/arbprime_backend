@@ -91,6 +91,7 @@ export const loginUser = async (req: Request, res: Response) => {
         username: user.username,
         email: user.email,
         role: user.role,
+        token: token
       };
 
       // Define a expiração em milissegundos (1 dia) para uso no cookie e na resposta
@@ -159,4 +160,13 @@ export const getUserInfo = async (req: Request, res: Response) => {
     } catch (error) {
       res.status(500).json(createResponse(0, 'Erro interno do servidor', { error }));
     }
+};
+
+export const getUserAuth = async (req: Request, res: Response) => {
+  const translations = res.locals.translations;
+  try {
+    res.status(200).json(createResponse(1, 'usuário está autenticado', req.userData?.token ));
+  } catch (error) {
+    res.status(500).json(createResponse(0, 'Erro interno do servidor', { error }));
+  }
 };
