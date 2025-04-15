@@ -17,7 +17,7 @@ type ClientPayload = {
 };
 
 const clientsMap = new Map<WebSocket, ClientPayload>();
-const monitorClients = new Map<WebSocket, { symbol: string; spot: string; future: string }>();
+const monitorClients = new Map<WebSocket, ClientPayload>();
 
 async function handleSingleRequest(ws: WebSocket, method: string, options: Record<string, unknown>, user: UserData | null) {
     let data: unknown = null;
@@ -69,6 +69,10 @@ async function handleAutoBroadcast(method: string) {
       data = await getArbitragePairs(0, 100); // ainda genérico
     }
 
+    if (method === 'monitor_pairs') {
+      data = await calculateArbitrage(options, user);
+    }
+
     if (data) {
       const message = JSON.stringify({ success: true, method, data });
 
@@ -110,6 +114,8 @@ export function startWebSocketServer() {
         try {
           const payload = JSON.parse(message.toString());
           const { method, options = {} } = payload;
+
+          console.log(method,options);
   
           if (!method) {
             ws.send(JSON.stringify({ success: false, message: "Método não informado." }));
@@ -124,21 +130,18 @@ export function startWebSocketServer() {
             clientsMap.delete(ws);
             await handleSingleRequest(ws, method, options, user);
           }
-  
+
           // Monitor específico
-          if (method === "monitor_pairs" && options.symbol && options.spot && options.future) {
-            monitorClients.set(ws, {
-              symbol: options.symbol as string,
-              spot: options.spot as string,
-              future: options.future as string,
-            });
-            logger.log(`🕵️ Iniciado monitoramento do par ${options.symbol}`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Yellow);
+          if (method === "monitor_pairs" && options.symbol && options.exchangeA && options.exchangeB) { //TODO: Temporario a função acima faz a mesma coisa.
+            //monitorClients.set(ws, { method, options, user });
+            clientsMap.set(ws, { method, options, user });
+            //logger.log(`🕵️ Iniciado monitoramento do par ${options.symbol}`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Yellow);
           }
   
           // Parar atualizações
           if (method === "stop") {
             clientsMap.delete(ws);
-            monitorClients.delete(ws);
+            //monitorClients.delete(ws);
             logger.log(`⏹️ Cliente removido de todos os canais`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Red);
           }
         } catch (error) {
@@ -156,6 +159,6 @@ export function startWebSocketServer() {
   
     // Broadcast de métodos com autoUpdate
     setInterval(() => handleAutoBroadcast("arbitrage_betting"), 5000);
-    //setInterval(() => handleAutoBroadcast("arbitrage_pairs"), 1000);
-    //setInterval(() => handleMonitorPairs(), 1000);
+    setInterval(() => handleAutoBroadcast("arbitrage_pairs"), 1000);
+    setInterval(() => handleAutoBroadcast("monitor_pairs"), 1000);
 }

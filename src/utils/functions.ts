@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import dotenv from "dotenv";
 import redisClient from '@Core/redis';
-import { SurebetData, UserData } from '@Interfaces';
+import { MonitorOptions, SurebetData, UserData } from '@Interfaces';
 dotenv.config();
 
 const ARB_FOLDER_BASE_RKEY = process.env.ARB_FOLDER_BASE_RKEY || 'ArbBetting';
@@ -16,9 +16,9 @@ const ARB_LIST_LIVE_HASH_RKEY = process.env.ARB_LIST_LIVE_HASH_RKEY || 'Arbitrag
  * @param {string} exchange - Nome da exchange.
  * @returns {{ maker: number; taker: number }} - Retorna um objeto com as taxas da exchange.
  */
-async function getFeesForExchange(symbol: string, exchange: string): Promise<{ taker: number; maker: number }> {
+async function getFeesForExchange(symbol: unknown, exchange: string): Promise<{ taker: number; maker: number }> {
     try {
-        const feesForPair = await redisClient.hget('exchanges_fees', symbol);
+        const feesForPair = await redisClient.hget('exchanges_fees', symbol as string);
         if (!feesForPair) return { taker: 0, maker: 0 }; // Retorna taxas padrão se não existir
 
         const parsedFees = JSON.parse(feesForPair); // Converte a string JSON em objeto
@@ -59,24 +59,50 @@ export async function getArbitragePairs(minProfitPercentage = 0, maxProfitPercen
  * @param {string} futureExchange - Nome da exchange do mercado `future` (exemplo: "mexc").
  * @returns {Promise<any>} - Retorna um objeto contendo os valores de cada exchange.
  */
-export async function getPairData(symbol: string, spotExchange: string, futureExchange: string): Promise<any> {
+export async function getPairData(options?: MonitorOptions): Promise<any> {
     try {
-        // Busca os dados do par no mercado Spot
-        const spotData = await redisClient.hget('pairs_markets', `spot:${symbol}`);
-        const parsedSpot = spotData ? JSON.parse(spotData).find((p: any) => p.exchange === spotExchange) : null;
-
-        // Busca os dados do par no mercado Future
-        const futureData = await redisClient.hget('pairs_markets', `future:${symbol}`);
-        const parsedFuture = futureData ? JSON.parse(futureData).find((p: any) => p.exchange === futureExchange) : null;
-
-        return {
-            symbol,
-            spot: parsedSpot ? { market: 'spot', exchange: spotExchange, ...parsedSpot } : null,
-            future: parsedFuture ? { market: 'future', exchange: futureExchange, ...parsedFuture } : null,
-        };
+      if (!options) return null;
+  
+      const { symbol, exchangeA, exchangeA_type, exchangeB, exchangeB_type } = options;
+  
+      // Monta as chaves para Redis
+      const keyA = `${exchangeA_type}:${symbol}`;
+      const keyB = `${exchangeB_type}:${symbol}`;
+  
+      // Busca os dados
+      const dataA = await redisClient.hget('pairs_markets', keyA);
+      const dataB = await redisClient.hget('pairs_markets', keyB);
+  
+      const parsedA = dataA ? JSON.parse(dataA).find((p: any) => p.exchange === exchangeA) : null;
+      const parsedB = dataB ? JSON.parse(dataB).find((p: any) => p.exchange === exchangeB) : null;
+  
+      const result: any = {
+        symbol,
+        exchangeA: parsedA
+          ? { market: exchangeA_type, exchange: exchangeA, ...parsedA }
+          : null,
+        exchangeB: parsedB
+          ? { market: exchangeB_type, exchange: exchangeB, ...parsedB }
+          : null
+      };  
+      return result;
     } catch (error) {
-        return { symbol, spot: null, future: null };
+      return {
+        symbol: options?.symbol,
+        exchangeA: null,
+        exchangeB: null
+      };
     }
+}
+
+function isValidMonitorOptions(obj: any): obj is MonitorOptions {
+    return (
+      typeof obj?.symbol === 'string' &&
+      typeof obj?.exchangeA === 'string' &&
+      typeof obj?.exchangeB === 'string' &&
+      (obj?.exchangeA_type === 'spot' || obj?.exchangeA_type === 'future') &&
+      (obj?.exchangeB_type === 'spot' || obj?.exchangeB_type === 'future')
+    );
 }
 
 /**
@@ -87,66 +113,72 @@ export async function getPairData(symbol: string, spotExchange: string, futureEx
  * @param {string} futureExchange - Nome da exchange do mercado `future` (exemplo: "mexc").
  * @returns {Promise<any>} - Retorna um objeto contendo os cálculos de arbitragem.
  */
-export async function calculateArbitrage(symbol: string, spotExchange: string, futureExchange: string): Promise<any> {
+export async function calculateArbitrage(options?: Record<string, unknown>, user?: UserData | null): Promise<any> {
     try {
-        // Obtém os dados do par nas exchanges spot e future
-        const pairData = await getPairData(symbol, spotExchange, futureExchange);
+        if (!isValidMonitorOptions(options)) {
+            return { success: false, message: "Parâmetros inválidos para arbitragem." };
+        }
 
-        if (!pairData.spot || !pairData.future) {
+        // Obtém os dados do par nas exchanges spot e future
+        const pairData = await getPairData(options);
+
+        if (!pairData.exchangeA || !pairData.exchangeB) {
             return { success: false, message: "Dados insuficientes para cálculo de arbitragem." };
         }
 
-        const spot = pairData.spot;
-        const future = pairData.future;
+        const dataA = pairData.exchangeA;
+        const dataB = pairData.exchangeB;
 
-        if (!spot.ask || !spot.bid || !future.ask || !future.bid) {
+        if (!dataA.ask || !dataA.bid || !dataB.ask || !dataB.bid) {
             return { success: false, message: "Preços insuficientes para cálculo de arbitragem." };
         }
 
         // Obtem as taxas de negociação
-        const spotFees = await getFeesForExchange(symbol,spot.exchange);
-        const futureFees = await getFeesForExchange(symbol,future.exchange);
+        const dataAFees = await getFeesForExchange(options?.symbol,dataA.exchange);
+        const dataBFees = await getFeesForExchange(options?.symbol,dataB.exchange);
 
-        if (isNaN(spotFees.taker) || isNaN(futureFees.taker)) {
+        if (isNaN(dataAFees.taker) || isNaN(dataBFees.taker)) {
             return { success: false, message: "Taxas inválidas para as exchanges fornecidas." };
         }
 
         // Quantidade negociável (mínimo entre os volumes)
-        const volume = Math.min(spot.volume, future.volume);
+        const volume = Math.min(dataA.volume, dataB.volume);
 
         // Taxas de entrada
-        const feeSpotEntry = (spot.ask * volume) * spotFees.taker;
-        const feeFutureEntry = (future.bid * volume) * futureFees.taker;
-        const feeSpotExit = (spot.bid * volume) * spotFees.maker;
-        const feeFutureExit = (future.ask * volume) * futureFees.maker;
+        const feeDataAEntry = (dataA.ask * volume) * dataAFees.taker;
+        const feeDataBEntry = (dataA.bid * volume) * dataBFees.taker;
+        const feeDataAExit = (dataA.bid * volume) * dataAFees.maker;
+        const feeDataBExit = (dataA.ask * volume) * dataBFees.maker;
 
         // Total das taxas
-        const totalFeesValue = feeSpotEntry + feeFutureEntry + feeSpotExit + feeFutureExit;
+        const totalFeesValue = feeDataAEntry + feeDataBEntry + feeDataAExit + feeDataBExit;
 
         // Converte taxas em percentual
-        const totalValueTraded = spot.ask * volume; // Valor total negociado no SPOT
+        const totalValueTraded = dataA.ask * volume; // Valor total negociado no SPOT
         const totalFeesPercentage = (totalFeesValue / totalValueTraded) * 100;
 
         // Calcula spread e lucro bruto
-        const spread = future.bid - spot.ask;
-        const profit = (spread / spot.ask) * 100;
+        const spread = dataB.bid - dataA.ask;
+        const profit = (spread / dataA.ask) * 100;
 
         // Lucro líquido após taxas
         const profitNet = profit - totalFeesPercentage;
 
         return {
-            symbol,
-            spots: [{
-                exchange: spot.exchange,
-                ask: spot.ask,
-                bid: spot.bid,
-                volume: spot.volume
+            symbol: options?.symbol,
+            dataA: [{
+                market: dataA.market,
+                exchange: dataA.exchange,
+                ask: dataA.ask,
+                bid: dataA.bid,
+                volume: dataA.volume
             }],
-            futures: [{
-                exchange: future.exchange,
-                ask: future.ask,
-                bid: future.bid,
-                volume: future.volume
+            dataB: [{
+                market: dataB.market,
+                exchange: dataB.exchange,
+                ask: dataB.ask,
+                bid: dataB.bid,
+                volume: dataB.volume
             }],
             spread,
             profit,

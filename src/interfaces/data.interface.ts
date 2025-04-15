@@ -41,7 +41,15 @@ export interface ExchangeFees {
     gate: ExchangeFee;
     kucoin: ExchangeFee;
     mexc: ExchangeFee;
-  }
+}
+
+export interface MonitorOptions {
+    symbol: string;
+    exchangeA: string;
+    exchangeA_type: 'spot' | 'future';
+    exchangeB: string;
+    exchangeB_type: 'spot' | 'future';
+}
 
 export interface SurebetOdd {
     option: string;
