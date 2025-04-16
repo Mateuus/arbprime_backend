@@ -115,7 +115,7 @@ export function startWebSocketServer() {
           const payload = JSON.parse(message.toString());
           const { method, options = {} } = payload;
 
-          console.log(method,options);
+          //console.log(method,options);
   
           if (!method) {
             ws.send(JSON.stringify({ success: false, message: "Método não informado." }));
