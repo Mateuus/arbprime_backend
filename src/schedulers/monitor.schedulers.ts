@@ -158,7 +158,7 @@ async function processMonitor(): Promise<{ status: string, result: string, execu
 
                 // Calcula spread e lucro
                 const spread = bestFuture.bid - bestSpot.ask;
-                const profit = (spread / bestSpot.ask) * 100;
+                const profit = ((bestFuture.bid / bestSpot.ask) -1) * 100;
                 const profitNet = profit - totalFeesPercentage;
 
                 const symbolId = findSymbolPair(symbol);
