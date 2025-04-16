@@ -152,7 +152,7 @@ async function processMonitor(): Promise<{ status: string, result: string, execu
                 const feeFutureEntry = bestFuture.bid * futureFees.taker;
                 const feeSpotExit = bestSpot.bid * spotFees.maker;
                 const feeFutureExit = bestFuture.ask * futureFees.maker;
-                const totalFeesValue = feeSpotEntry + feeFutureEntry + feeSpotExit/* + feeFutureExit*/;
+                const totalFeesValue = feeSpotEntry + feeFutureEntry/*  + feeSpotExit+ feeFutureExit*/;
                 const totalFeesPercentage = (totalFeesValue / bestSpot.ask) * 100;
 
 
@@ -163,7 +163,7 @@ async function processMonitor(): Promise<{ status: string, result: string, execu
 
                 const symbolId = findSymbolPair(symbol);
     
-                if (spread > spreadBase) {
+                if (profit > spreadBase) {
                     arbitragePairs[symbol] = {
                         symbol,
                         symbolId,

@@ -38,7 +38,7 @@ async function getFeesForExchange(symbol: unknown, exchange: string): Promise<{ 
  * @param {number} maxProfitPercentage - O percentual máximo de lucro para filtrar os pares (padrão: 100).
  * @returns {Promise<any[]>} - Retorna uma lista de pares de arbitragem ordenados do maior para o menor lucro.
  */
-export async function getArbitragePairs(minProfitPercentage = 0, maxProfitPercentage = 100): Promise<any[]> {
+export async function getArbitragePairs(minProfitPercentage: number = 0.5, maxProfitPercentage: number = 100): Promise<any[]> {
     try {
         const data = await redisClient.hgetall('arbitrage_pairs');
         return Object.entries(data)

@@ -66,7 +66,7 @@ async function handleAutoBroadcast(method: string) {
     }
 
     if (method === 'arbitrage_pairs') {
-      data = await getArbitragePairs(0, 100); // ainda genérico
+      data = await getArbitragePairs(); // ainda genérico
     }
 
     if (method === 'monitor_pairs') {
