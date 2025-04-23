@@ -58,7 +58,6 @@ async function initializeServices() {
 
         logger.log("📡 Iniciando o servidor WebSocket...", LoggerClass.LogCategory.Server, "[ROOT]", LoggerClass.LogColor.White);
         startWebSocketServer();
-        await eventHandlerCreate(); // Execut
         if (process.env.NODE_ENV === 'production') {
             await eventHandlerCreate(); // Executa apenas em produção
             logger.log("🛠️ EventHandler carregado para ambiente de produção", LoggerClass.LogCategory.Server, "[ROOT]", LoggerClass.LogColor.Green);

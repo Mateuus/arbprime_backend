@@ -196,12 +196,30 @@ async function processMonitor(): Promise<{ status: string, result: string, execu
         }
     });
 
-      // 🔹 Passo 3: Salvar apenas oportunidades lucrativas no Redis
-      await Promise.all(
-          Object.entries(arbitragePairs).map(([symbol, arbitrage]) =>
+    // 🔹 Passo 3: Salvar apenas oportunidades lucrativas no Redis
+    await Promise.all(
+        Object.entries(arbitragePairs).map(([symbol, arbitrage]) =>
             redisClient.hset(redisKeyArbitrage, symbol, JSON.stringify(arbitrage))
-          )
-      );
+        )
+    );
+
+      // 🔹 Passo 4: Remover símbolos que não existem mais nem em spot nem em future
+    const allPairKeys = await redisClient.hkeys(redisKeyPair);
+    const activeSymbols = new Set(
+    allPairKeys.map(key => key.split(':')[1]) // extrai apenas o symbol
+    );
+
+    const arbKeys = await redisClient.hkeys(redisKeyArbitrage);
+    const removePipeline = redisClient.pipeline();
+
+    arbKeys.forEach(symbol => {
+    if (!activeSymbols.has(symbol)) {
+        removePipeline.hdel(redisKeyArbitrage, symbol);
+        console.warn(`🧹 Removido arbitrage_pairs órfão: ${symbol}`);
+    }
+    });
+
+await removePipeline.exec();
        
     } catch (error) {
       console.error('Erro ao processar e salvar tickers:', error);

@@ -29,6 +29,10 @@ async function handleSingleRequest(ws: WebSocket, method: string, options: Recor
     if (method === "arbitrage_pairs") {
       data = await getArbitragePairs(0, 100); // No futuro pode passar filtro por options
     }
+
+    if (method === 'monitor_pairs') {
+      data = await calculateArbitrage(options, user);
+    }
   
     if (data) {
       ws.send(JSON.stringify({ success: true, method, data }));
@@ -115,7 +119,7 @@ export function startWebSocketServer() {
           const payload = JSON.parse(message.toString());
           const { method, options = {} } = payload;
 
-          //console.log(method,options);
+          console.log(method,options);
   
           if (!method) {
             ws.send(JSON.stringify({ success: false, message: "Método não informado." }));
