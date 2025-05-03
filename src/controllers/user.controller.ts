@@ -170,3 +170,45 @@ export const getUserAuth = async (req: Request, res: Response) => {
     res.status(500).json(createResponse(0, 'Erro interno do servidor', { error }));
   }
 };
+
+export const changePassword = async (req: Request, res: Response) => {
+  const translations = res.locals.translations;
+  const email = req.userData?.email;
+  const { currentPassword, newPassword } = req.body;
+
+  if (!currentPassword || !newPassword) {
+    res.status(400).json(createResponse(0, 'translations.fieldsMissing', []));
+    return;
+  }
+
+  try {
+    await new Promise(resolve => setTimeout(resolve, 1500));
+
+    let user =  await userRepository.createQueryBuilder('user')
+    .addSelect('user.password') // Inclui explicitamente o campo `password`
+    .where('user.email = :email', { email })
+    .getOne();
+
+    if (!user || !user.password) {
+      res.status(401).json(createResponse(0, 'E-mail ou senha inválidos.', []));
+      return;
+    }
+
+    const isPasswordValid = await bcrypt.compare(currentPassword, user.password);
+    if (!isPasswordValid) {
+      res.status(401).json(createResponse(0, 'A senha atual está incorreta. Verifique e tente novamente.', []));
+      return;
+    }
+
+    // 🔐 Hash da nova senha
+    const newHashedPassword = await bcrypt.hash(newPassword, 10);
+    user.password = newHashedPassword;
+
+    // 💾 Salva nova senha
+    await userRepository.save(user);
+
+    res.status(200).json(createResponse(1, translations.passwordChangedSuccessfully || "Senha alterada com sucesso", {}));
+  } catch (err) {
+    res.status(500).json(createResponse(0, 'translations.internalServerError', { error: err }));
+  }
+};

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { registerUser, loginUser,logoutAccount, getUserInfo, getUserAuth } from "@Controllers";
+import { registerUser, loginUser,logoutAccount, getUserInfo, getUserAuth, changePassword } from "@Controllers";
 import { checkAuth } from '../middlewares/auth.middleware';
 
 const UserRouter = Router();
@@ -9,5 +9,6 @@ UserRouter.post('/login', loginUser);
 UserRouter.post('/logout', checkAuth, logoutAccount);
 UserRouter.get('/info', checkAuth, getUserInfo);
 UserRouter.get('/auth', checkAuth, getUserAuth);
+UserRouter.put('/change-password', checkAuth, changePassword);
 
 export default UserRouter;

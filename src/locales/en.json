@@ -1,5 +1,6 @@
 {
     "welcome": "Welcome to the API!",
-    "unauthorized": "Unauthorized access"
+    "unauthorized": "Unauthorized access",
+    "invalidCredentials": "Invalid Credentials"
 }
   
