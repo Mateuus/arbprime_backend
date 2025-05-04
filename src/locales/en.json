@@ -1,6 +1,12 @@
 {
     "welcome": "Welcome to the API!",
     "unauthorized": "Unauthorized access",
-    "invalidCredentials": "Invalid Credentials"
+    "invalidCredentials": "Invalid Credentials",
+    "internalServerError": "Internal server error",
+    "fieldsMissing": "Required fields are missing",
+    "existingEmail": "This email is already in use",
+    "failedToSave": "Failed to save data",
+    "accountCreated": "Your account has been successfully created",
+    "loginSuccessful": "Login successful"
 }
   

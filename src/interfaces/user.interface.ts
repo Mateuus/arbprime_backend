@@ -11,8 +11,14 @@ export interface UserRegister {
 
 export interface UserResponseDTO {
     id: string;
-    username: string;
+    fullname: string;
+    personal_id: string;
+    phone: string;
     email: string;
+    balace: string;
     role: string;
+    level: number;
+    referralCode: string;
     token: string;
+    profile: string;
 }

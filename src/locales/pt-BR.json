@@ -1,6 +1,20 @@
 {
     "welcome": "Bem-vindo à API!",
     "unauthorized": "Acesso não autorizado",
-    "invalidCredentials": "Credenciais inválidas."
+    "invalidCredentials": "Credenciais inválidas.",
+    "internalServerError": "Erro interno no servidor",
+    "fieldsMissing": "Campos obrigatórios ausentes",
+    "existingCPF": "Este cpf já está em uso",
+    "existingEmail": "Este e-mail já está em uso",
+    "failedToSave": "Falha ao salvar os dados",
+    "accountCreated": "Sua conta foi criada com sucesso",
+    "loginSuccessful": "Login realizado com sucesso",
+    "logoutSuccessful": "Logout realizado com sucesso",
+    "accountAuthenticated": "Sua conta está autenticada",
+    "invalidEmailOrPassword": "E-mail ou senha inválidos.",
+    "incorrectCurrentPassword": "A senha atual está incorreta. Verifique e tente novamente.",
+    "passwordChangedSuccessfully": "Senha alterada com sucesso",
+    "accountRecoveredSuccessfully": "Conta recuperada com sucesso",
+    "accountDoesNotExist": "A conta não existe"
 }
   
