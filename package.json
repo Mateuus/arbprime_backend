@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc",
+    "postbuild": "copyfiles -u 1 \"src/locales/**/*\" dist/",
     "start": "node -r module-alias/register dist/index.js",
     "dev": "nodemon --exec 'node -r ts-node/register -r module-alias/register ./src/index.ts'",
     "start:server": "node dist/core/server.js",

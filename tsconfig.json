@@ -34,6 +34,6 @@
       "@utils/*": ["src/utils/*"]
     }
   },
-  "include": ["src/**/*.ts", "src/types/**/*.d.ts"],
+  "include": ["src/**/*.ts", "src/types/**/*.d.ts","src/locales/**/*"],
   "exclude": ["node_modules"]
 }

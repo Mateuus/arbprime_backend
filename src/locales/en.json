@@ -1,12 +1,20 @@
 {
     "welcome": "Welcome to the API!",
     "unauthorized": "Unauthorized access",
-    "invalidCredentials": "Invalid Credentials",
+    "invalidCredentials": "Invalid credentials.",
     "internalServerError": "Internal server error",
     "fieldsMissing": "Required fields are missing",
+    "existingCPF": "This CPF is already in use",
     "existingEmail": "This email is already in use",
     "failedToSave": "Failed to save data",
     "accountCreated": "Your account has been successfully created",
-    "loginSuccessful": "Login successful"
-}
+    "loginSuccessful": "Login successful",
+    "logoutSuccessful": "Logout successful",
+    "accountAuthenticated": "Your account is authenticated",
+    "invalidEmailOrPassword": "Invalid email or password.",
+    "incorrectCurrentPassword": "The current password is incorrect. Please check and try again.",
+    "passwordChangedSuccessfully": "Password changed successfully",
+    "accountRecoveredSuccessfully": "Account recovered successfully",
+    "accountDoesNotExist": "The account does not exist"
+  }
   
