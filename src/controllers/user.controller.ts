@@ -34,7 +34,7 @@ export const registerUser = async (req: Request, res: Response) => {
     }
 
     try {
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      await new Promise(resolve => setTimeout(resolve, 1000));
 
       const existingCPF = await userRepository.findOneBy({ cpf: personal_id });
       if (existingCPF) {
@@ -73,7 +73,7 @@ export const loginUser = async (req: Request, res: Response) => {
     const translations = res.locals.translations;
     const { email, password } = req.body;
 
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    await new Promise(resolve => setTimeout(resolve, 1000));
 
     if (!email || !password) {
       res.status(400).json(createResponse(0, translations.fieldsMissing, []));
