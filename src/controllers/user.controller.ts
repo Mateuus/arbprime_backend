@@ -25,10 +25,7 @@ export const lookupCPF = async (req: Request, res: Response) => {
 
 export const registerUser = async (req: Request, res: Response) => {
     const translations = res.locals.translations;
-    
     const {email, fullname, personal_id, phone, password, invitedBy}  = req.body;
-    console.log(email);
-    console.log(translations);
     
     // Verificação de campos obrigatórios
     if (!phone || !email || !password || !personal_id) {
