@@ -12,7 +12,7 @@ export interface UserRegister {
 export interface UserResponseDTO {
     id: string;
     fullname: string;
-    personal_id: string;
+    cpf: string;
     phone: string;
     email: string;
     balace: string;

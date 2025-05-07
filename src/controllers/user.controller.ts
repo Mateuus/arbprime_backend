@@ -4,10 +4,11 @@ import axios from 'axios';
 import jwt from 'jsonwebtoken';
 import { AppDataSource } from '@Database';
 import { createResponse } from "@utils/resFormatter";
-import { User } from "@Entities";
+import { User, ABFilter } from "@Entities";
 import { UserResponseDTO } from "@Interfaces";
 
 const userRepository = AppDataSource.getRepository(User);
+const abFilterRepository = AppDataSource.getRepository(ABFilter);
 
 export const lookupCPF = async (req: Request, res: Response) => {
   const translations = res.locals.translations;
@@ -113,7 +114,7 @@ export const loginUser = async (req: Request, res: Response) => {
       const userResponse: UserResponseDTO = {
         id: user.id,
         fullname: user.fullname,
-        personal_id: user.cpf,
+        cpf: user.cpf,
         phone: user.phone,
         email: user.email,
         balace: user.balance,
@@ -249,5 +250,88 @@ export const changePassword = async (req: Request, res: Response) => {
     res.status(200).json(createResponse(1, translations.passwordChangedSuccessfully, {}));
   } catch (err) {
     res.status(500).json(createResponse(0, translations.internalServerError, { error: err }));
+  }
+};
+
+export const getUserFilters = async (req: Request, res: Response) => {
+  const userId = req.userData?.userId;
+
+  try {
+    const filters = await abFilterRepository.find({ where: { userId } });
+    res.json(createResponse(1, 'Filtros carregados com sucesso.', filters));
+  } catch (error) {
+    res.status(500).json(createResponse(0, 'Erro ao buscar filtros.', { error }));
+  }
+};
+
+export const getFilterById = async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const userId = req.userData?.userId;
+
+  try {
+    const filter = await abFilterRepository.findOneBy({ id, userId });
+
+    if (!filter) {
+      res.status(404).json(createResponse(0, 'Filtro não encontrado.', []));
+      return;
+    }
+
+    res.json(createResponse(1, 'Filtro carregado.', filter));
+  } catch (error) {
+    res.status(500).json(createResponse(0, 'Erro ao buscar filtro.', { error }));
+  }
+};
+
+export const createFilter = async (req: Request, res: Response) => {
+  const userId = req.userData?.userId;
+  const data = req.body;
+
+  try {
+    const newFilter = abFilterRepository.create({ ...data, userId });
+    await abFilterRepository.save(newFilter);
+
+    res.status(201).json(createResponse(1, 'Filtro criado com sucesso.', newFilter));
+  } catch (error) {
+    res.status(500).json(createResponse(0, 'Erro ao criar filtro.', { error }));
+  }
+};
+
+export const updateFilter = async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const userId = req.userData?.userId;
+  const data = req.body;
+
+  try {
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    const filter = await abFilterRepository.findOneBy({ id, userId });
+    if (!filter) {
+      res.status(404).json(createResponse(0, 'Filtro não encontrado.', []));
+      return;
+    }
+
+    abFilterRepository.merge(filter, data);
+    await abFilterRepository.save(filter);
+
+    res.json(createResponse(1, 'Filtro atualizado com sucesso.', filter));
+  } catch (error) {
+    res.status(500).json(createResponse(0, 'Erro ao atualizar filtro.', { error }));
+  }
+};
+
+export const deleteFilter = async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const userId = req.userData?.userId;
+
+  try {
+    const filter = await abFilterRepository.findOneBy({ id, userId });
+    if (!filter) {
+      res.status(404).json(createResponse(0, 'Filtro não encontrado.', []));
+      return;
+    }
+
+    await abFilterRepository.remove(filter);
+    res.json(createResponse(1, 'Filtro excluído com sucesso.', []));
+  } catch (error) {
+    res.status(500).json(createResponse(0, 'Erro ao excluir filtro.', { error }));
   }
 };
