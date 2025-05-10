@@ -1,15 +1,22 @@
 import { NextFunction, Request, Response } from "express";
 import dotenv from "dotenv";
 import redisClient from "@Core/redis";
-import { createResponse } from "@utils";
+import { areNamesSimilar, capitalizeFirst, createResponse } from "@utils";
 import TeamAliasManager from "@Core/TeamAliasManager";
 
 dotenv.config();
 
 const ARBPRIME_FOLDER_BASE_RKEY = process.env.ARBPRIME_FOLDER_BASE_RKEY ? process.env.ARBPRIME_FOLDER_BASE_RKEY : "ArbPrime";
-const REDIS_KEY = `${ARBPRIME_FOLDER_BASE_RKEY}:Configs:ProxyList`;
+const ARB_FOLDER_BASE_RKEY = process.env.ARB_FOLDER_BASE_RKEY ? process.env.ARB_FOLDER_BASE_RKEY : "ArbBetting";
+const ARB_LIST_PREMATCH_HASH_RKEY = process.env.ARB_LIST_PREMATCH_HASH_RKEY ? process.env.ARB_LIST_PREMATCH_HASH_RKEY : "ArbitrageListPrematch";
+const ARB_LIST_LIVE_HASH_RKEY = process.env.ARB_LIST_LIVE_HASH_RKEY ? process.env.ARB_LIST_LIVE_HASH_RKEY : "ArbitrageListLive";
+const ARB_EVENT_MATCH_LIST_RKEY = process.env.ARB_EVENT_MATCH_LIST_RKEY ? process.env.ARB_EVENT_MATCH_LIST_RKEY : "EventMatchList";
 
-const TEAM_ALIAS_HASH = "ArbPrime:Configs:TeamAliases";
+const REDIS_KEY = `${ARBPRIME_FOLDER_BASE_RKEY}:Configs:ProxyList`;
+const TEAM_ALIAS_HASH = `${ARBPRIME_FOLDER_BASE_RKEY}:Configs:TeamAliases`;
+const EVENT_MATCH_LIST = `${ARB_FOLDER_BASE_RKEY}:${ARB_EVENT_MATCH_LIST_RKEY}`;
+const ARB_LIST_PREMATCH = `${ARB_FOLDER_BASE_RKEY}:${ARB_LIST_PREMATCH_HASH_RKEY}`;
+const ARB_LIST_LIVE = `${ARB_FOLDER_BASE_RKEY}:${ARB_LIST_LIVE_HASH_RKEY}`;
 
 export const getProxyList = async (req: Request, res: Response) => {
     const translations = res.locals.translations;  
@@ -225,3 +232,218 @@ export const removeTeamAliases = async (req: Request, res: Response) => {
     res.status(500).json(createResponse(0, 'Erro interno do servidor', { error }));
   }
 }
+
+export const searchEventByTeams = async (req: Request, res: Response) => {
+  const translations = res.locals.translations;
+  const { team } = req.query;
+
+  if (!team) {
+    res.status(400).json(createResponse(0, "Parâmetro 'team' é obrigatório.", []));
+    return;
+  }
+
+  try {
+    const allEvents = await redisClient.hgetall(EVENT_MATCH_LIST);
+    const results = Object.entries(allEvents)
+      .map(([id, value]) => {
+        try {
+          const parsed = JSON.parse(value);
+          const home = parsed.home?.toLowerCase();
+          const away = parsed.away?.toLowerCase();
+          if (
+            home?.includes(String(team).toLowerCase()) ||
+            away?.includes(String(team).toLowerCase())
+          ) {
+            return { id, ...parsed };
+          }
+          return null;
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+
+    if (results.length === 0) {
+      res.status(404).json(createResponse(0, "Nenhum evento encontrado.", []));
+      return;
+    }
+
+    res.status(200).json(createResponse(1, "Eventos encontrados com sucesso.", results));
+    return;
+  } catch (error) {
+    res.status(500).json(createResponse(0, "Erro interno ao buscar eventos.", { error }));
+    return;
+  }
+};
+
+export const handleEventAction = async (req: Request, res: Response) => {
+  const { action, eventIds } = req.body;
+  const user = req.userData;
+
+  if (!user || user.role !== "admin") {
+    res.status(403).json(createResponse(0, "Apenas administradores podem realizar essa ação.", []));
+    return;
+  }
+
+  if (!["enable", "disable"].includes(action)) {
+    res.status(400).json(createResponse(0, "Ação inválida. Use 'enable' ou 'disable'.", []));
+    return;
+  }
+
+  if (!Array.isArray(eventIds) || eventIds.length === 0) {
+    res.status(400).json(createResponse(0, "Parâmetro 'eventIds' deve ser um array não vazio.", []));
+    return;
+  }
+
+  const results = {
+    updated: [] as string[],
+    notFound: [] as string[],
+    failed: [] as { eventId: string; reason: string }[],
+    removedFromArbs: [] as string[]
+  };
+
+  for (const eventId of eventIds) {
+    try {
+      const raw = await redisClient.hget(EVENT_MATCH_LIST, eventId);
+      if (!raw) {
+        results.notFound.push(eventId);
+        continue;
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        results.failed.push({ eventId, reason: "JSON inválido" });
+        continue;
+      }
+
+      parsed.disabled = action === "disable";
+      await redisClient.hset(EVENT_MATCH_LIST, eventId, JSON.stringify(parsed));
+      results.updated.push(eventId);
+
+      // ❗️Somente se for disable, remove das listas de arbitragem
+      if (action === "disable") {
+        const removedFrom = [];
+
+        const prematchRemoved = await redisClient.hdel(ARB_LIST_PREMATCH, eventId);
+        if (prematchRemoved) removedFrom.push("Prematch");
+
+        const liveRemoved = await redisClient.hdel(ARB_LIST_LIVE, eventId);
+        if (liveRemoved) removedFrom.push("Live");
+
+        if (removedFrom.length > 0) {
+          results.removedFromArbs.push(`${eventId} → ${removedFrom.join(" & ")}`);
+        }
+      }
+    } catch (err) {
+      results.failed.push({ eventId, reason: "Erro interno" });
+    }
+  }
+
+  const label = action === "disable" ? "desativados" : "reativados";
+  res.status(200).json(createResponse(1, `Eventos ${label} com sucesso.`, results));
+};
+
+export const searchEventByBookmaker = async (req: Request, res: Response) => {
+  const { sport, bookmaker, team } = req.query;
+
+  if (!sport || !bookmaker || !team) {
+    res.status(400).json(createResponse(0, "Parâmetros 'bookmaker' e 'team' e 'sport' são obrigatórios.", []));
+    return;
+  }
+
+  const redisKey = `${ARB_FOLDER_BASE_RKEY}:${capitalizeFirst(String(sport))}:${String(bookmaker).toLowerCase()}`;
+  const inputTeam = String(team);
+
+  try {
+    const allEvents = await redisClient.hgetall(redisKey);
+
+    if (!allEvents || Object.keys(allEvents).length === 0) {
+      res.status(404).json(createResponse(0, `Nenhum evento encontrado para o bookmaker '${bookmaker}'`, []));
+      return;
+    }
+
+    const filtered = Object.entries(allEvents)
+      .map(([id, value]) => {
+        try {
+          const parsed = JSON.parse(value);
+          const home = parsed.home || "";
+          const away = parsed.away || "";
+
+          if (
+            areNamesSimilar(home, inputTeam) ||
+            areNamesSimilar(away, inputTeam)
+          ) {
+            return { id, ...parsed };
+          }
+
+          return null;
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+
+    if (filtered.length === 0) {
+      res.status(404).json(createResponse(0, "Nenhum evento correspondente encontrado.", []));
+      return;
+    }
+
+    res.status(200).json(createResponse(1, "Eventos encontrados com sucesso.", filtered));
+    return;
+  } catch (error) {
+    res.status(500).json(createResponse(0, "Erro interno ao buscar eventos.", { error }));
+    return;
+  }
+};
+
+export const disableBookmakerEvents = async (req: Request, res: Response) => {
+  const { sport, bookmaker, eventIds } = req.body;
+  const user = req.userData;
+
+  if (!user || user.role !== 'admin') {
+    res.status(403).json(createResponse(0, "Apenas administradores podem desativar eventos.", []));
+    return;
+  }
+
+  if (!sport || !bookmaker || !Array.isArray(eventIds) || eventIds.length === 0) {
+    res.status(400).json(createResponse(0, "Parâmetros 'sport', 'bookmaker' e 'eventIds' são obrigatórios.", []));
+    return;
+  }
+
+  const redisKey = `${ARB_FOLDER_BASE_RKEY}:${capitalizeFirst(sport)}:${bookmaker.toLowerCase()}`;
+  const results = {
+    updated: [] as string[],
+    notFound: [] as string[],
+    failed: [] as { eventId: string, reason: string }[]
+  };
+
+  for (const eventId of eventIds) {
+    try {
+      const raw = await redisClient.hget(redisKey, eventId);
+
+      if (!raw) {
+        results.notFound.push(eventId);
+        continue;
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        results.failed.push({ eventId, reason: "JSON inválido" });
+        continue;
+      }
+
+      parsed.disabled = true;
+
+      await redisClient.hset(redisKey, eventId, JSON.stringify(parsed));
+      results.updated.push(eventId);
+    } catch (err) {
+      results.failed.push({ eventId, reason: "Erro interno" });
+    }
+  }
+
+  res.status(200).json(createResponse(1, "Eventos desativados com sucesso no bookmaker.", results));
+};

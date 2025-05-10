@@ -3,11 +3,16 @@ import fs from 'fs';
 import dotenv from "dotenv";
 import redisClient from '@Core/redis';
 import { MonitorOptions, SurebetData, UserData } from '@Interfaces';
+import stringSimilarity from "string-similarity";
+import levenshtein from "fast-levenshtein";
 dotenv.config();
 
 const ARB_FOLDER_BASE_RKEY = process.env.ARB_FOLDER_BASE_RKEY || 'ArbBetting';
 const ARB_LIST_PREMATCH_HASH_RKEY = process.env.ARB_LIST_PREMATCH_HASH_RKEY || 'ArbitrageListPrematch';
 const ARB_LIST_LIVE_HASH_RKEY = process.env.ARB_LIST_LIVE_HASH_RKEY || 'ArbitrageListLive';
+const TEAM_ALIAS_HASH = "ArbPrime:Configs:TeamAliases";
+
+const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || "0.85"); // Padrão: 85%
 
 /**
  * Obtém as taxas de uma exchange específica.
@@ -245,4 +250,32 @@ export async function getFormattedSurebets(type: string, options?: Record<string
       console.error('Erro ao processar surebets:', error);
       return [];
     }
+}
+
+export function normalizeName(str: string): string {
+    return str
+      .toLowerCase()
+      .normalize("NFD") // separa os acentos
+      .replace(/[\u0300-\u036f]/g, "") // remove acentos
+      .replace(/[^a-z0-9\s]/gi, "") // remove caracteres especiais
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+  
+
+export function areNamesSimilar(name1: string, name2: string): boolean {
+  const a = normalizeName(name1);
+  const b = normalizeName(name2);
+  if (a === b) return true;
+
+  const jw = stringSimilarity.compareTwoStrings(a, b);
+  const lev = levenshtein.get(a, b);
+  const levNorm = 1 - lev / Math.max(a.length, b.length);
+
+  return jw >= SIMILARITY_THRESHOLD || levNorm >= SIMILARITY_THRESHOLD;
+}
+
+export function capitalizeFirst(str: string): string {
+  const lower = str.toLowerCase();
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
 }
