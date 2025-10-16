@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { getEvents, getEventById, getEventsStats } from "@Controllers/events.controller";
+import { getEvents, getEventById, getEventsStats, getEventDetails } from "@Controllers/events.controller";
 
 const router = Router();
 
@@ -21,5 +21,11 @@ router.get('/stats', getEventsStats);
  * @desc Buscar evento específico por ID
  */
 router.get('/:id', getEventById);
+
+/**
+ * @route GET /api/events/:id/details
+ * @desc Buscar detalhes completos do evento com mercados e odds
+ */
+router.get('/:id/details', getEventDetails);
 
 export default router;
