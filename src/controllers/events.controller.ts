@@ -431,6 +431,19 @@ export const getEventDetails = async (req: Request, res: Response): Promise<void
         });
 
 
+        // Criar objeto com links das casas de apostas
+        const bookmakerLinks: Record<string, string> = {};
+        
+        // Adicionar link da casa base
+        bookmakerLinks[event.baseBookmaker] = event.link;
+        
+        // Adicionar links das outras casas de apostas
+        event.matches.forEach(match => {
+            if (match.link && match.bookmaker !== event.baseBookmaker) {
+                bookmakerLinks[match.bookmaker] = match.link;
+            }
+        });
+
         // Resposta com detalhes completos
         res.status(200).json(createResponse(1, "Detalhes do evento carregados com sucesso", {
             event: {
@@ -447,6 +460,7 @@ export const getEventDetails = async (req: Request, res: Response): Promise<void
                 create_at: event.create_at
             },
             bookmakers: allBookmakers.map(b => b.bookmaker),
+            bookmakerLinks: bookmakerLinks,
             markets: processedMarkets,
             marketsCount: processedMarkets.length,
             bookmakersWithMarkets: Object.keys(marketsData)
