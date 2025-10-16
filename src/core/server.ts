@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import routes from "@Routes";
 import { localeMiddleware } from "../middlewares/locale";
 import { logger, LoggerClass } from "@Core/logger";
+import eventsRoutes from "@Routes/events.routes";
 
 // Carregar variáveis de ambiente
 dotenv.config();
@@ -43,6 +44,7 @@ app.use(localeMiddleware); // Usa o middleware de tradução
 
 // Configurar Rotas
 app.use("/", routes);
+app.use("/events", eventsRoutes);
 
 // Iniciar o Servidor
 export const startServer = () => {

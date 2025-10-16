@@ -3,7 +3,7 @@ import cron from 'node-cron';
 import path from 'path';
 import dotenv from "dotenv";
 import { logger, LoggerClass } from "@Core/logger";
-import { checkRedisConnection } from "@Core/redis";
+import { initializeRedis, isRedisConnected } from "@Core/redis";
 import { startServer } from "@Core/server";
 import { startWebSocketServer } from "@Core/websocket";
 import { LogCategory, LogColor } from '@Enums';
@@ -24,6 +24,7 @@ cron.schedule('*/1 * * * * *', () => {
 async function eventHandlerCreate() {
     
     /*******************************************MONITOR**************************************************************/
+    
     eventHandler.addTask({
         name: '[MONITOR]',
         lastExecuted: null,
@@ -34,6 +35,7 @@ async function eventHandlerCreate() {
     });
 
     /*******************************************MONITOR FEES*********************************************************/
+    /*
     eventHandler.addTask({
         name: '[MONITOR FEES]',
         lastExecuted: null,
@@ -41,15 +43,21 @@ async function eventHandlerCreate() {
         workerPath: getWorkerPath('feesmonitor.schedulers'),
         options: {  },
         color: LogColor.Yellow
-    });
+    });*/
 }
 
 async function initializeServices() {
     try {
-        // 🔄 Verificar se o Redis está online
-        const isRedisOnline = await checkRedisConnection();
+        // 🔄 Inicializar e verificar se o Redis está online
+        logger.log("🔄 Inicializando Redis...", LoggerClass.LogCategory.Database, "[ROOT]", LoggerClass.LogColor.White);
+        const isRedisOnline = await initializeRedis();
         if (!isRedisOnline) {
             throw new Error("Redis não está disponível.");
+        }
+        
+        // Verificar se a instância está ativa
+        if (!isRedisConnected()) {
+            throw new Error("Instância do Redis não está conectada.");
         }
 
         // ✅ Iniciar o servidor Express

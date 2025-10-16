@@ -46,7 +46,7 @@ async function loadFeesFromRedis(): Promise<void> {
         const fees = await redisClient.hgetall(redisKeyFees);
         if (fees) {
             for (const [pair, value] of Object.entries(fees)) {
-                exchangesFees[pair] = JSON.parse(value);
+                exchangesFees[pair] = JSON.parse(value as string);
             }
         }
         //console.log('📥 Taxas carregadas do Redis para a memória.');
@@ -62,7 +62,7 @@ async function loadSymbolInfoFromRedis(): Promise<void> {
         
         if (info && Object.keys(info).length > 0) {
             for (const [pair, value] of Object.entries(info)) {
-                symbolInfo[pair] = JSON.parse(value); // Corrigido para carregar os dados corretamente
+                symbolInfo[pair] = JSON.parse(value as string); // Corrigido para carregar os dados corretamente
             }
         }
     } catch (error) {
@@ -84,7 +84,7 @@ async function fetchPairsFromRedis(marketType: string): Promise<Record<string, E
   Object.entries(allPairs).forEach(([key, value]) => {
       if (key.startsWith(`${marketType}:`)) {
           const symbol = key.replace(`${marketType}:`, '');
-          filteredPairs[symbol] = JSON.parse(value);
+          filteredPairs[symbol] = JSON.parse(value as string);
       }
   });
 

@@ -1,7 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import dotenv from "dotenv";
-import redisClient from '@Core/redis';
+import { getRedisClient } from '@Core/redis';
 import { MonitorOptions, SurebetData, UserData } from '@Interfaces';
 import stringSimilarity from "string-similarity";
 import levenshtein from "fast-levenshtein";
@@ -23,6 +23,7 @@ const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || "0.8
  */
 async function getFeesForExchange(symbol: unknown, exchange: string): Promise<{ taker: number; maker: number }> {
     try {
+        const redisClient = getRedisClient();
         const feesForPair = await redisClient.hget('exchanges_fees', symbol as string);
         if (!feesForPair) return { taker: 0, maker: 0 }; // Retorna taxas padrão se não existir
 
@@ -45,9 +46,10 @@ async function getFeesForExchange(symbol: unknown, exchange: string): Promise<{ 
  */
 export async function getArbitragePairs(minProfitPercentage: number = 0.5, maxProfitPercentage: number = 100): Promise<any[]> {
     try {
+        const redisClient = getRedisClient();
         const data = await redisClient.hgetall('arbitrage_pairs');
         return Object.entries(data)
-            .map(([symbol, value]) => ({ symbol, ...JSON.parse(value) }))
+            .map(([symbol, value]) => ({ symbol, ...JSON.parse(value as string) }))
             .filter(pair => pair.profit >= minProfitPercentage && pair.profit <= maxProfitPercentage)
             .sort((a, b) => b.profit - a.profit);
     } catch (error) {
@@ -75,6 +77,7 @@ export async function getPairData(options?: MonitorOptions): Promise<any> {
       const keyB = `${exchangeB_type}:${symbol}`;
   
       // Busca os dados
+      const redisClient = getRedisClient();
       const dataA = await redisClient.hget('pairs_markets', keyA);
       const dataB = await redisClient.hget('pairs_markets', keyB);
   
@@ -227,11 +230,12 @@ export const getWorkerPath = (fileName: string): string => {
 export async function getFormattedSurebets(type: string, options?: Record<string, unknown>, user?: UserData | null): Promise<SurebetData[]> {
     try {
       const ARB_LIST_RKEY = type === 'live' ? ARB_LIST_LIVE_HASH_RKEY : ARB_LIST_PREMATCH_HASH_RKEY;
+      const redisClient = getRedisClient();
       const raw = await redisClient.hgetall(`${ARB_FOLDER_BASE_RKEY}:${ARB_LIST_RKEY}`);
       const entries = Object.entries(raw);
   
       const parsed: SurebetData[] = entries.map(([id, json]) => {
-        const data = JSON.parse(json) as SurebetData;
+        const data = JSON.parse(json as string) as SurebetData;
   
         // Ordena os surebets por profitMargin DESC
         data.surebets.sort((a, b) => b.profitMargin - a.profitMargin);

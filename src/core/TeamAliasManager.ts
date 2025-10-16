@@ -1,4 +1,4 @@
-import redisClient from "@Core/redis";
+import { getRedisClient } from "@Core/redis";
 
 const TEAM_ALIAS_HASH = "ArbPrime:Configs:TeamAliases";
 
@@ -9,10 +9,11 @@ class TeamAliasManager {
    * Carrega os aliases do Redis em memória
    */
   public async loadAliasCache(): Promise<void> {
+    const redisClient = getRedisClient();
     const all = await redisClient.hgetall(TEAM_ALIAS_HASH);
     for (const [field, value] of Object.entries(all)) {
       try {
-        const aliases = JSON.parse(value);
+        const aliases = JSON.parse(value as string);
         if (Array.isArray(aliases)) {
           this.aliasCache.set(field, aliases);
         }
@@ -59,6 +60,7 @@ class TeamAliasManager {
     if (!this.aliasCache.has(field)) {
       const list = [baseName];
       this.aliasCache.set(field, list);
+      const redisClient = getRedisClient();
       await redisClient.hset(TEAM_ALIAS_HASH, field, JSON.stringify(list));
     }
   }

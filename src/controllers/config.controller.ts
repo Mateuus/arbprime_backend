@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from "express";
 import dotenv from "dotenv";
-import redisClient from "@Core/redis";
+import { getRedisClient } from "@Core/redis";
 import { areNamesSimilar, capitalizeFirst, createResponse } from "@utils";
 import TeamAliasManager from "@Core/TeamAliasManager";
 
@@ -21,6 +21,7 @@ const ARB_LIST_LIVE = `${ARB_FOLDER_BASE_RKEY}:${ARB_LIST_LIVE_HASH_RKEY}`;
 export const getProxyList = async (req: Request, res: Response) => {
     const translations = res.locals.translations;  
     try {
+      const redisClient = getRedisClient();
       const proxiesRaw = await redisClient.hgetall(REDIS_KEY);
       const proxies = Object.entries(proxiesRaw).map(([hash, value]) => {
         try {
@@ -61,6 +62,8 @@ export const addProxyList = async (req: Request, res: Response): Promise<void> =
     let added = 0;
     let skipped = 0;
     let invalid = 0;
+
+    const redisClient = getRedisClient();
 
     for (const line of lines) {
       const regex = /^([^:]+):([^@]+)@([0-9.]+):(\d+)$/;
@@ -115,6 +118,7 @@ export const findTeamAliases = async (req: Request, res: Response) => {
     } 
 
     const search = name.trim().toUpperCase();
+    const redisClient = getRedisClient();
     const all = await redisClient.hgetall(TEAM_ALIAS_HASH);
 
     const matches = Object.entries(all)
@@ -158,6 +162,7 @@ export const addTeamAliases = async (req: Request, res: Response) => {
     } 
 
     const field = TeamAliasManager['buildFieldKey'](fieldName); // transforma em FIELD padronizado (ex: "SANTOS FC")
+    const redisClient = getRedisClient();
     const existingRaw = await redisClient.hget(TEAM_ALIAS_HASH, field);
   
     let currentValues: string[] = [];
@@ -199,6 +204,7 @@ export const removeTeamAliases = async (req: Request, res: Response) => {
     }
 
     const field = TeamAliasManager['buildFieldKey'](fieldName);
+    const redisClient = getRedisClient();
     const existingRaw = await redisClient.hget(TEAM_ALIAS_HASH, field);
 
     if (!existingRaw) {
@@ -243,6 +249,7 @@ export const searchEventByTeams = async (req: Request, res: Response) => {
   }
 
   try {
+    const redisClient = getRedisClient();
     const allEvents = await redisClient.hgetall(EVENT_MATCH_LIST);
     const results = Object.entries(allEvents)
       .map(([id, value]) => {
@@ -302,6 +309,8 @@ export const handleEventAction = async (req: Request, res: Response) => {
     removedFromArbs: [] as string[]
   };
 
+  const redisClient = getRedisClient();
+  
   for (const eventId of eventIds) {
     try {
       const raw = await redisClient.hget(EVENT_MATCH_LIST, eventId);
@@ -357,6 +366,7 @@ export const searchEventByBookmaker = async (req: Request, res: Response) => {
   const inputTeam = String(team);
 
   try {
+    const redisClient = getRedisClient();
     const allEvents = await redisClient.hgetall(redisKey);
 
     if (!allEvents || Object.keys(allEvents).length === 0) {
@@ -419,6 +429,8 @@ export const disableBookmakerEvents = async (req: Request, res: Response) => {
     failed: [] as { eventId: string, reason: string }[]
   };
 
+  const redisClient = getRedisClient();
+  
   for (const eventId of eventIds) {
     try {
       const raw = await redisClient.hget(redisKey, eventId);
