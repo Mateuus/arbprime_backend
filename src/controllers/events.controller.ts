@@ -295,9 +295,6 @@ export const getEventDetails = async (req: Request, res: Response): Promise<void
             ...(event.matches?.map(match => ({ bookmaker: match.bookmaker, isBase: false })) || [])
         ];
 
-        console.log(`[DEBUG] Evento ID: ${id}`);
-        console.log(`[DEBUG] Esporte: ${event.sport}`);
-        console.log(`[DEBUG] Bookmakers encontrados:`, allBookmakers.map(b => b.bookmaker));
 
         // Buscar mercados para cada bookmaker
         const marketsData: Record<string, MarketFormat[]> = {};
@@ -311,25 +308,17 @@ export const getEventDetails = async (req: Request, res: Response): Promise<void
                     const match = event.matches.find(m => m.bookmaker === bookmaker);
                     if (match && match.eventId) {
                         eventId = match.eventId.toString();
-                        console.log(`[DEBUG] Usando eventId específico para ${bookmaker}: ${eventId}`);
-                    } else {
-                        console.log(`[DEBUG] EventId não encontrado para ${bookmaker}, usando ID padrão: ${eventId}`);
                     }
-                } else {
-                    console.log(`[DEBUG] Usando ID padrão para baseBookmaker ${bookmaker}: ${eventId}`);
                 }
                 
                 const marketKey = `ArbBetting:Markets:${event.sport.charAt(0).toUpperCase() + event.sport.slice(1)}:${bookmaker}:${eventId}`;
-                console.log(`[DEBUG] Buscando mercado com chave: ${marketKey}`);
                 
                 const marketRaw = await redisClient.hgetall(marketKey);
-                console.log(`[DEBUG] Resultado para ${bookmaker}:`, marketRaw ? Object.keys(marketRaw).length : 'null');
                 
                 if (marketRaw && Object.keys(marketRaw).length > 0) {
                     const markets: MarketFormat[] = Object.entries(marketRaw).map(([marketId, marketValue]) => {
                         try {
                             const market = JSON.parse(marketValue as string) as MarketFormat;
-                            console.log(`[DEBUG] Mercado parseado: ${marketId} - ${market.name}`);
                             return market;
                         } catch (error) {
                             console.error(`Erro ao fazer parse do mercado ${marketId} para ${bookmaker}:`, error);
@@ -339,17 +328,13 @@ export const getEventDetails = async (req: Request, res: Response): Promise<void
                     
                     if (markets.length > 0) {
                         marketsData[bookmaker] = markets;
-                        console.log(`[DEBUG] ${markets.length} mercados carregados para ${bookmaker}`);
                     }
-                } else {
-                    console.log(`[DEBUG] Nenhum mercado encontrado para ${bookmaker}`);
                 }
             } catch (error) {
                 console.error(`Erro ao buscar mercados para ${bookmaker}:`, error);
             }
         }
 
-        console.log(`[DEBUG] Total de bookmakers com mercados:`, Object.keys(marketsData).length);
 
         // Processar e organizar odds por mercado
         const processedMarkets: Array<{
