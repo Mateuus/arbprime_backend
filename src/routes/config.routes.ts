@@ -1,21 +1,17 @@
-import { Router } from "express";
+import { FastifyInstance } from "fastify";
 import { getProxyList, addProxyList, findTeamAliases, addTeamAliases, removeTeamAliases, searchEventByTeams, searchEventByBookmaker, disableBookmakerEvents, handleEventAction } from "@Controllers";
-import { checkAuth } from '../middlewares/auth.middleware';
+import { checkAuth } from "../middlewares/auth.middleware";
 
-const router = Router();
+export default async function configRoutes(app: FastifyInstance) {
+  app.get("/proxy/list", getProxyList);
+  app.post("/proxy/add-list", addProxyList);
 
-router.get("/proxy/list", getProxyList);
-router.post("/proxy/add-list", addProxyList);
+  app.get("/team/aliases/find", findTeamAliases);
+  app.post("/team/aliases/add", addTeamAliases);
+  app.delete("/team/aliases/remove", removeTeamAliases);
 
-router.get("/team/aliases/find", findTeamAliases);
-router.post("/team/aliases/add", addTeamAliases);
-router.delete("/team/aliases/remove", removeTeamAliases);
-
-
-
-router.get('/event/search', checkAuth, searchEventByTeams);
-router.post('/event/action', checkAuth, handleEventAction );
-router.get('/event/bookmaker/search', checkAuth, searchEventByBookmaker);
-router.post('/event/bookmaker/disable', checkAuth, disableBookmakerEvents);
-
-export default router;
+  app.get("/event/search", { preHandler: checkAuth }, searchEventByTeams);
+  app.post("/event/action", { preHandler: checkAuth }, handleEventAction);
+  app.get("/event/bookmaker/search", { preHandler: checkAuth }, searchEventByBookmaker);
+  app.post("/event/bookmaker/disable", { preHandler: checkAuth }, disableBookmakerEvents);
+}

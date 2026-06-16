@@ -1,7 +1,7 @@
-import { Request, Response } from "express";
+import { FastifyRequest, FastifyReply } from "fastify";
 
 export const homeController = {
-  getHome: (req: Request, res: Response) => {
-    res.json({ message: "Bem-vindo à API!" });
+  getHome: (req: FastifyRequest, reply: FastifyReply) => {
+    return reply.send({ message: "Bem-vindo à API!" });
   }
 };

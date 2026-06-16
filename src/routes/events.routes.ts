@@ -1,31 +1,29 @@
-import { Router } from "express";
+import { FastifyInstance } from "fastify";
 import { getEvents, getEventById, getEventsStats, getEventDetails } from "@Controllers/events.controller";
 
-const router = Router();
+export default async function eventsRoutes(app: FastifyInstance) {
+  /**
+   * @route GET /events
+   * @desc Buscar eventos com paginação e filtros
+   * @query page, limit, search, sport, disabled, league, bookmaker
+   */
+  app.get("/", getEvents);
 
-/**
- * @route GET /api/events
- * @desc Buscar eventos com paginação e filtros
- * @query page, limit, search, sport, disabled, league, bookmaker
- */
-router.get('/', getEvents);
+  /**
+   * @route GET /events/stats
+   * @desc Obter estatísticas dos eventos
+   */
+  app.get("/stats", getEventsStats);
 
-/**
- * @route GET /api/events/stats
- * @desc Obter estatísticas dos eventos
- */
-router.get('/stats', getEventsStats);
+  /**
+   * @route GET /events/:id
+   * @desc Buscar evento específico por ID
+   */
+  app.get("/:id", getEventById);
 
-/**
- * @route GET /api/events/:id
- * @desc Buscar evento específico por ID
- */
-router.get('/:id', getEventById);
-
-/**
- * @route GET /api/events/:id/details
- * @desc Buscar detalhes completos do evento com mercados e odds
- */
-router.get('/:id/details', getEventDetails);
-
-export default router;
+  /**
+   * @route GET /events/:id/details
+   * @desc Buscar detalhes completos do evento com mercados e odds
+   */
+  app.get("/:id/details", getEventDetails);
+}

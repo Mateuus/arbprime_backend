@@ -60,9 +60,9 @@ async function initializeServices() {
             throw new Error("Instância do Redis não está conectada.");
         }
 
-        // ✅ Iniciar o servidor Express
-        logger.log("📄 Iniciando o servidor Express...", LoggerClass.LogCategory.Server, "[ROOT]", LoggerClass.LogColor.White);
-        startServer();
+        // ✅ Iniciar o servidor Fastify
+        logger.log("📄 Iniciando o servidor Fastify...", LoggerClass.LogCategory.Server, "[ROOT]", LoggerClass.LogColor.White);
+        await startServer();
 
         logger.log("📡 Iniciando o servidor WebSocket...", LoggerClass.LogCategory.Server, "[ROOT]", LoggerClass.LogColor.White);
         startWebSocketServer();

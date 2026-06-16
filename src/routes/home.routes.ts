@@ -1,8 +1,6 @@
-import { Router } from "express";
+import { FastifyInstance } from "fastify";
 import { homeController } from "@Controllers";
 
-const router = Router();
-
-router.get("/", homeController.getHome);
-
-export default router;
+export default async function homeRoutes(app: FastifyInstance) {
+  app.get("/", homeController.getHome);
+}

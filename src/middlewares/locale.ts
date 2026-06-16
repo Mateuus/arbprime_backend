@@ -1,4 +1,5 @@
-import { Request, Response, NextFunction } from 'express';
+/// <reference path="../types/types.d.ts" />
+import { FastifyRequest } from 'fastify';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -12,7 +13,9 @@ const loadTranslations = (language: string) => {
   return {};
 };
 
-export const localeMiddleware = (req: Request, res: Response, next: NextFunction) => {
+// Hook onRequest do Fastify: detecta o idioma pelo cabeçalho 'Accept-Language'
+// e anexa as traduções/locale à requisição (equivalente ao antigo res.locals).
+export const localeHook = async (req: FastifyRequest) => {
   // Extrai o primeiro idioma da lista do cabeçalho 'Accept-Language'
   const acceptLanguageHeader = req.headers['accept-language'] || 'en';
   const primaryLanguage = acceptLanguageHeader.split(',')[0]; // Pega apenas o primeiro idioma
@@ -20,11 +23,7 @@ export const localeMiddleware = (req: Request, res: Response, next: NextFunction
   // Verifica se o idioma principal é suportado, senão usa o padrão 'en'
   const selectedLanguage = supportedLanguages.includes(primaryLanguage) ? primaryLanguage : 'en';
 
-  // Carrega as traduções para o idioma selecionado
-  const translations = loadTranslations(selectedLanguage);
- 
-  // Adiciona as traduções ao objeto de resposta
-  res.locals.translations = translations;
-  res.locals.locale = selectedLanguage;
-  next();
+  // Carrega as traduções e disponibiliza na requisição
+  req.translations = loadTranslations(selectedLanguage);
+  req.locale = selectedLanguage;
 };

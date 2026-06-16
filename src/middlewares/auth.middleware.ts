@@ -1,5 +1,5 @@
 /// <reference path="../types/types.d.ts" />
-import { Request, Response, NextFunction } from "express";
+import { FastifyRequest, FastifyReply } from "fastify";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 import { createResponse } from "@utils";
@@ -7,12 +7,13 @@ import { createResponse } from "@utils";
 // Carregar variáveis de ambiente
 dotenv.config();
 
-export const checkAuth = (req: Request, res: Response, next: NextFunction) => {
+// preHandler de autenticação do Fastify. Retornar a reply interrompe o ciclo
+// da requisição (Fastify detecta que a resposta já foi enviada).
+export const checkAuth = async (req: FastifyRequest, reply: FastifyReply) => {
   const token = req.cookies["MToken"];
 
   if (!token) {
-    res.status(401).json(createResponse(0, "Authentication token is missing", []));
-    return;
+    return reply.code(401).send(createResponse(0, "Authentication token is missing", []));
   }
 
   try {
@@ -23,8 +24,7 @@ export const checkAuth = (req: Request, res: Response, next: NextFunction) => {
 
     const decodedToken = jwt.verify(token, jwtSecret) as { id: string; email: string; role: string };
     req.userData = { userId: decodedToken.id, email: decodedToken.email, role: decodedToken.role, token: token };
-    next();
   } catch (error) {
-   res.status(401).json(createResponse(0, "Invalid authentication token", []));
+    return reply.code(401).send(createResponse(0, "Invalid authentication token", []));
   }
 };

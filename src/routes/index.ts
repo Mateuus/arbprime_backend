@@ -1,12 +1,10 @@
-import { Router } from "express";
+import { FastifyInstance } from "fastify";
 import homeRoutes from "./home.routes";
 import userRoutes from "./user.routes";
-import configRouters from "./config.routes";
+import configRoutes from "./config.routes";
 
-const router = Router();
-
-router.use("/", homeRoutes); 
-router.use("/user", userRoutes);
-router.use("/config", configRouters);
-
-export default router;
+export default async function routes(app: FastifyInstance) {
+  app.register(homeRoutes);
+  app.register(userRoutes, { prefix: "/user" });
+  app.register(configRoutes, { prefix: "/config" });
+}

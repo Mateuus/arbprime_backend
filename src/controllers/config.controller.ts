@@ -1,4 +1,4 @@
-import { NextFunction, Request, Response } from "express";
+import { FastifyRequest, FastifyReply } from "fastify";
 import dotenv from "dotenv";
 import { getRedisClient } from "@Core/redis";
 import { areNamesSimilar, capitalizeFirst, createResponse } from "@utils";
@@ -18,8 +18,7 @@ const EVENT_MATCH_LIST = `${ARB_FOLDER_BASE_RKEY}:${ARB_EVENT_MATCH_LIST_RKEY}`;
 const ARB_LIST_PREMATCH = `${ARB_FOLDER_BASE_RKEY}:${ARB_LIST_PREMATCH_HASH_RKEY}`;
 const ARB_LIST_LIVE = `${ARB_FOLDER_BASE_RKEY}:${ARB_LIST_LIVE_HASH_RKEY}`;
 
-export const getProxyList = async (req: Request, res: Response) => {
-    const translations = res.locals.translations;  
+export const getProxyList = async (req: FastifyRequest, reply: FastifyReply) => {
     try {
       const redisClient = getRedisClient();
       const proxiesRaw = await redisClient.hgetall(REDIS_KEY);
@@ -34,30 +33,26 @@ export const getProxyList = async (req: Request, res: Response) => {
           return null; // ignora entradas quebradas
         }
       }).filter(Boolean);
-  
-      res.status(200).json(createResponse(1, "Lista de proxies carregada com sucesso", proxies));
+
+      return reply.code(200).send(createResponse(1, "Lista de proxies carregada com sucesso", proxies));
     } catch (error) {
-      res.status(500).json(createResponse(0, 'Erro interno do servidor', { error }));
+      return reply.code(500).send(createResponse(0, 'Erro interno do servidor', { error }));
     }
 };
 
 /**
  * Adiciona uma lista de proxies ao Redis.
- *
- * @param {Request} req - Requisição Express.
- * @param {Response} res - Resposta Express.
- * @returns {Promise<void>} - Retorna uma Promise que resolve quando a operação é concluída.
  */
-export const addProxyList = async (req: Request, res: Response): Promise<void> => {
+export const addProxyList = async (req: FastifyRequest, reply: FastifyReply) => {
   try {
-    const rawList = req.body.list;
-    const ipType = req.body.ipType || "ipv4"; // Padrão para IPv4
+    const { list: rawList, ipType: ipTypeRaw } = req.body as { list?: string; ipType?: string };
+    const ipType = ipTypeRaw || "ipv4"; // Padrão para IPv4
 
     if (!rawList || typeof rawList !== "string") {
-       res.status(400).json(createResponse(0, "Lista de proxies ausente ou inválida", []));
+      return reply.code(400).send(createResponse(0, "Lista de proxies ausente ou inválida", []));
     }
 
-    const lines = rawList.split("\n").map((line: any) => line.trim()).filter(Boolean);
+    const lines = rawList.split("\n").map((line: string) => line.trim()).filter(Boolean);
 
     let added = 0;
     let skipped = 0;
@@ -98,24 +93,22 @@ export const addProxyList = async (req: Request, res: Response): Promise<void> =
       added++;
     }
 
-     res.status(200).json(
-      createResponse(1, `✅ Adicionados: ${added} | 🔁 Pulados (existentes): ${skipped} | ❌ Inválidos: ${invalid}`,[])
+    return reply.code(200).send(
+      createResponse(1, `✅ Adicionados: ${added} | 🔁 Pulados (existentes): ${skipped} | ❌ Inválidos: ${invalid}`, [])
     );
 
   } catch (error) {
     console.error("Erro ao adicionar proxies:", error);
-    res.status(500).json(createResponse(0, "Erro interno ao adicionar proxies", { error: error }));
+    return reply.code(500).send(createResponse(0, "Erro interno ao adicionar proxies", { error: error }));
   }
 };
 
-export const findTeamAliases = async (req: Request, res: Response) => {
-  const translations = res.locals.translations;  
-  const name = req.query.name as string;
+export const findTeamAliases = async (req: FastifyRequest, reply: FastifyReply) => {
+  const name = (req.query as { name?: string }).name as string;
   try {
     if (!name) {
-      res.status(400).json(createResponse(0, "Parâmetro 'name' é obrigatório",[]));
-      return;
-    } 
+      return reply.code(400).send(createResponse(0, "Parâmetro 'name' é obrigatório", []));
+    }
 
     const search = name.trim().toUpperCase();
     const redisClient = getRedisClient();
@@ -143,30 +136,27 @@ export const findTeamAliases = async (req: Request, res: Response) => {
     }));
 
     if (matches.length === 0) {
-       res.status(404).json(createResponse(0, `Nenhum resultado encontrado contendo '${search}'`,[]));
-       return
+       return reply.code(404).send(createResponse(0, `Nenhum resultado encontrado contendo '${search}'`, []));
     }
-    res.status(200).json(createResponse(1, `encontrado contendo '${search}'`, matches));
+    return reply.code(200).send(createResponse(1, `encontrado contendo '${search}'`, matches));
   } catch (error) {
-    res.status(500).json(createResponse(0, 'Erro interno do servidor', { error }));
+    return reply.code(500).send(createResponse(0, 'Erro interno do servidor', { error }));
   }
 }
 
-export const addTeamAliases = async (req: Request, res: Response) => {
-  const translations = res.locals.translations;  
-  const { fieldName, variation } = req.body;
+export const addTeamAliases = async (req: FastifyRequest, reply: FastifyReply) => {
+  const { fieldName, variation } = req.body as { fieldName?: string; variation?: string };
   try {
     if (!fieldName || !variation) {
-      res.status(400).json(createResponse(0, "Parâmetros 'fieldName' e 'variation' são obrigatórios.",[]));
-      return;
-    } 
+      return reply.code(400).send(createResponse(0, "Parâmetros 'fieldName' e 'variation' são obrigatórios.", []));
+    }
 
     const field = TeamAliasManager['buildFieldKey'](fieldName); // transforma em FIELD padronizado (ex: "SANTOS FC")
     const redisClient = getRedisClient();
     const existingRaw = await redisClient.hget(TEAM_ALIAS_HASH, field);
-  
+
     let currentValues: string[] = [];
-  
+
     if (existingRaw) {
       try {
         currentValues = JSON.parse(existingRaw);
@@ -174,33 +164,29 @@ export const addTeamAliases = async (req: Request, res: Response) => {
         currentValues = [];
       }
     }
-  
+
     // Evita duplicata
     if (!currentValues.includes(variation)) {
       currentValues.push(variation);
       await redisClient.hset(TEAM_ALIAS_HASH, field, JSON.stringify(currentValues));
-      res.status(200).json(createResponse(1, `Variação '${variation}' adicionada ao FIELD '${field}'`, currentValues));
-      return;
+      return reply.code(200).send(createResponse(1, `Variação '${variation}' adicionada ao FIELD '${field}'`, currentValues));
     }
 
-    res.status(200).json(createResponse(1, `A variação '${variation}' já existe no FIELD '${field}'`, currentValues));
+    return reply.code(200).send(createResponse(1, `A variação '${variation}' já existe no FIELD '${field}'`, currentValues));
   } catch (error) {
-    res.status(500).json(createResponse(0, 'Erro interno do servidor', { error }));
+    return reply.code(500).send(createResponse(0, 'Erro interno do servidor', { error }));
   }
 }
 
-export const removeTeamAliases = async (req: Request, res: Response) => {
-  const translations = res.locals.translations;  
-  const { fieldName, variation, index } = req.body;
+export const removeTeamAliases = async (req: FastifyRequest, reply: FastifyReply) => {
+  const { fieldName, variation, index } = req.body as { fieldName?: string; variation?: string; index?: number };
   try {
     if (!fieldName) {
-      res.status(400).json(createResponse(0, "Parâmetros 'fieldName' é obrigatórios.",[]));
-      return;
-    } 
+      return reply.code(400).send(createResponse(0, "Parâmetros 'fieldName' é obrigatórios.", []));
+    }
 
     if (!variation && (index === undefined || index === null)) {
-      res.status(400).json(createResponse(0, "Informe 'variation' ou 'index' para remover.",[]));
-      return;
+      return reply.code(400).send(createResponse(0, "Informe 'variation' ou 'index' para remover.", []));
     }
 
     const field = TeamAliasManager['buildFieldKey'](fieldName);
@@ -208,44 +194,39 @@ export const removeTeamAliases = async (req: Request, res: Response) => {
     const existingRaw = await redisClient.hget(TEAM_ALIAS_HASH, field);
 
     if (!existingRaw) {
-      res.status(404).json(createResponse(0, `FIELD '${field}' não encontrado.`, []));
-      return;
+      return reply.code(404).send(createResponse(0, `FIELD '${field}' não encontrado.`, []));
     }
-  
+
     let currentValues: string[] = [];
     try {
       currentValues = JSON.parse(existingRaw);
     } catch {
-      res.status(500).json(createResponse(0, `Erro ao interpretar as variações do FIELD '${field}'.`, []));
-      return;
+      return reply.code(500).send(createResponse(0, `Erro ao interpretar as variações do FIELD '${field}'.`, []));
     }
-  
+
     let updatedValues: string[] = [];
-  
+
     if (variation) {
       updatedValues = currentValues.filter(v => v !== variation);
     } else if (typeof index === "number" && index >= 0 && index < currentValues.length) {
       updatedValues = currentValues.filter((_, i) => i !== index);
     } else {
-      res.status(400).json(createResponse(0, `Índice inválido para remoção.`, []));
-      return;
+      return reply.code(400).send(createResponse(0, `Índice inválido para remoção.`, []));
     }
-  
+
     await redisClient.hset(TEAM_ALIAS_HASH, field, JSON.stringify(updatedValues));
 
-    res.status(200).json(createResponse(1, `Variação removida com sucesso.`, updatedValues));
+    return reply.code(200).send(createResponse(1, `Variação removida com sucesso.`, updatedValues));
   } catch (error) {
-    res.status(500).json(createResponse(0, 'Erro interno do servidor', { error }));
+    return reply.code(500).send(createResponse(0, 'Erro interno do servidor', { error }));
   }
 }
 
-export const searchEventByTeams = async (req: Request, res: Response) => {
-  const translations = res.locals.translations;
-  const { team } = req.query;
+export const searchEventByTeams = async (req: FastifyRequest, reply: FastifyReply) => {
+  const { team } = req.query as { team?: string };
 
   if (!team) {
-    res.status(400).json(createResponse(0, "Parâmetro 'team' é obrigatório.", []));
-    return;
+    return reply.code(400).send(createResponse(0, "Parâmetro 'team' é obrigatório.", []));
   }
 
   try {
@@ -271,35 +252,29 @@ export const searchEventByTeams = async (req: Request, res: Response) => {
       .filter(Boolean);
 
     if (results.length === 0) {
-      res.status(404).json(createResponse(0, "Nenhum evento encontrado.", []));
-      return;
+      return reply.code(404).send(createResponse(0, "Nenhum evento encontrado.", []));
     }
 
-    res.status(200).json(createResponse(1, "Eventos encontrados com sucesso.", results));
-    return;
+    return reply.code(200).send(createResponse(1, "Eventos encontrados com sucesso.", results));
   } catch (error) {
-    res.status(500).json(createResponse(0, "Erro interno ao buscar eventos.", { error }));
-    return;
+    return reply.code(500).send(createResponse(0, "Erro interno ao buscar eventos.", { error }));
   }
 };
 
-export const handleEventAction = async (req: Request, res: Response) => {
-  const { action, eventIds } = req.body;
+export const handleEventAction = async (req: FastifyRequest, reply: FastifyReply) => {
+  const { action, eventIds } = req.body as { action?: string; eventIds?: string[] };
   const user = req.userData;
 
   if (!user || user.role !== "admin") {
-    res.status(403).json(createResponse(0, "Apenas administradores podem realizar essa ação.", []));
-    return;
+    return reply.code(403).send(createResponse(0, "Apenas administradores podem realizar essa ação.", []));
   }
 
-  if (!["enable", "disable"].includes(action)) {
-    res.status(400).json(createResponse(0, "Ação inválida. Use 'enable' ou 'disable'.", []));
-    return;
+  if (!action || !["enable", "disable"].includes(action)) {
+    return reply.code(400).send(createResponse(0, "Ação inválida. Use 'enable' ou 'disable'.", []));
   }
 
   if (!Array.isArray(eventIds) || eventIds.length === 0) {
-    res.status(400).json(createResponse(0, "Parâmetro 'eventIds' deve ser um array não vazio.", []));
-    return;
+    return reply.code(400).send(createResponse(0, "Parâmetro 'eventIds' deve ser um array não vazio.", []));
   }
 
   const results = {
@@ -310,7 +285,7 @@ export const handleEventAction = async (req: Request, res: Response) => {
   };
 
   const redisClient = getRedisClient();
-  
+
   for (const eventId of eventIds) {
     try {
       const raw = await redisClient.hget(EVENT_MATCH_LIST, eventId);
@@ -351,15 +326,14 @@ export const handleEventAction = async (req: Request, res: Response) => {
   }
 
   const label = action === "disable" ? "desativados" : "reativados";
-  res.status(200).json(createResponse(1, `Eventos ${label} com sucesso.`, results));
+  return reply.code(200).send(createResponse(1, `Eventos ${label} com sucesso.`, results));
 };
 
-export const searchEventByBookmaker = async (req: Request, res: Response) => {
-  const { sport, bookmaker, team } = req.query;
+export const searchEventByBookmaker = async (req: FastifyRequest, reply: FastifyReply) => {
+  const { sport, bookmaker, team } = req.query as { sport?: string; bookmaker?: string; team?: string };
 
   if (!sport || !bookmaker || !team) {
-    res.status(400).json(createResponse(0, "Parâmetros 'bookmaker' e 'team' e 'sport' são obrigatórios.", []));
-    return;
+    return reply.code(400).send(createResponse(0, "Parâmetros 'bookmaker' e 'team' e 'sport' são obrigatórios.", []));
   }
 
   const redisKey = `${ARB_FOLDER_BASE_RKEY}:${capitalizeFirst(String(sport))}:${String(bookmaker).toLowerCase()}`;
@@ -370,8 +344,7 @@ export const searchEventByBookmaker = async (req: Request, res: Response) => {
     const allEvents = await redisClient.hgetall(redisKey);
 
     if (!allEvents || Object.keys(allEvents).length === 0) {
-      res.status(404).json(createResponse(0, `Nenhum evento encontrado para o bookmaker '${bookmaker}'`, []));
-      return;
+      return reply.code(404).send(createResponse(0, `Nenhum evento encontrado para o bookmaker '${bookmaker}'`, []));
     }
 
     const filtered = Object.entries(allEvents)
@@ -396,30 +369,25 @@ export const searchEventByBookmaker = async (req: Request, res: Response) => {
       .filter(Boolean);
 
     if (filtered.length === 0) {
-      res.status(404).json(createResponse(0, "Nenhum evento correspondente encontrado.", []));
-      return;
+      return reply.code(404).send(createResponse(0, "Nenhum evento correspondente encontrado.", []));
     }
 
-    res.status(200).json(createResponse(1, "Eventos encontrados com sucesso.", filtered));
-    return;
+    return reply.code(200).send(createResponse(1, "Eventos encontrados com sucesso.", filtered));
   } catch (error) {
-    res.status(500).json(createResponse(0, "Erro interno ao buscar eventos.", { error }));
-    return;
+    return reply.code(500).send(createResponse(0, "Erro interno ao buscar eventos.", { error }));
   }
 };
 
-export const disableBookmakerEvents = async (req: Request, res: Response) => {
-  const { sport, bookmaker, eventIds } = req.body;
+export const disableBookmakerEvents = async (req: FastifyRequest, reply: FastifyReply) => {
+  const { sport, bookmaker, eventIds } = req.body as { sport?: string; bookmaker?: string; eventIds?: string[] };
   const user = req.userData;
 
   if (!user || user.role !== 'admin') {
-    res.status(403).json(createResponse(0, "Apenas administradores podem desativar eventos.", []));
-    return;
+    return reply.code(403).send(createResponse(0, "Apenas administradores podem desativar eventos.", []));
   }
 
   if (!sport || !bookmaker || !Array.isArray(eventIds) || eventIds.length === 0) {
-    res.status(400).json(createResponse(0, "Parâmetros 'sport', 'bookmaker' e 'eventIds' são obrigatórios.", []));
-    return;
+    return reply.code(400).send(createResponse(0, "Parâmetros 'sport', 'bookmaker' e 'eventIds' são obrigatórios.", []));
   }
 
   const redisKey = `${ARB_FOLDER_BASE_RKEY}:${capitalizeFirst(sport)}:${bookmaker.toLowerCase()}`;
@@ -430,7 +398,7 @@ export const disableBookmakerEvents = async (req: Request, res: Response) => {
   };
 
   const redisClient = getRedisClient();
-  
+
   for (const eventId of eventIds) {
     try {
       const raw = await redisClient.hget(redisKey, eventId);
@@ -457,5 +425,5 @@ export const disableBookmakerEvents = async (req: Request, res: Response) => {
     }
   }
 
-  res.status(200).json(createResponse(1, "Eventos desativados com sucesso no bookmaker.", results));
+  return reply.code(200).send(createResponse(1, "Eventos desativados com sucesso no bookmaker.", results));
 };
