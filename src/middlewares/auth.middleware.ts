@@ -28,3 +28,10 @@ export const checkAuth = async (req: FastifyRequest, reply: FastifyReply) => {
     return reply.code(401).send(createResponse(0, "Invalid authentication token", []));
   }
 };
+
+// preHandler de autorização: exige role 'admin' (use depois de checkAuth).
+export const checkAdmin = async (req: FastifyRequest, reply: FastifyReply) => {
+  if (!req.userData || req.userData.role !== "admin") {
+    return reply.code(403).send(createResponse(0, "Acesso restrito a administradores", []));
+  }
+};

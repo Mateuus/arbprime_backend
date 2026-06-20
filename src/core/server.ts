@@ -37,6 +37,9 @@ app.register(cors, {
       callback(new Error("Origin não permitida pelo CORS"), false);
     }
   },
+  // Default do @fastify/cors é apenas 'GET,HEAD,POST'; precisamos liberar PUT/PATCH/DELETE
+  // (editar/toggle/excluir proxies, etc.) senão o preflight bloqueia essas requisições.
+  methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE"],
   credentials: true,            // Permite envio de cookies e credenciais
   optionsSuccessStatus: 200     // Compatibilidade com navegadores mais antigos
 });
