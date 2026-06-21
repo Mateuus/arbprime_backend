@@ -8,6 +8,7 @@ import routes from "@Routes";
 import { localeHook } from "../middlewares/locale";
 import { logger, LoggerClass } from "@Core/logger";
 import eventsRoutes from "@Routes/events.routes";
+import externalEventsRoutes from "@Routes/external-events.routes";
 
 // Carregar variáveis de ambiente
 dotenv.config();
@@ -53,6 +54,7 @@ app.addHook("onRequest", localeHook);
 // Configurar Rotas (mesmos prefixos do Express: /, /user, /config, /events)
 app.register(routes);
 app.register(eventsRoutes, { prefix: "/events" });
+app.register(externalEventsRoutes, { prefix: "/external/events" });
 
 // Iniciar o Servidor
 export const startServer = async () => {

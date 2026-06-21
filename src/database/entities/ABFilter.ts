@@ -46,7 +46,18 @@ import {
   
     @Column({ type: 'int', nullable: true })
     ageMax!: number;
-  
+
+    // Odds (a mínima pode ser negativa, ex.: odds de lay/americanas).
+    @Column({ type: 'float', nullable: true })
+    oddsMin!: number;
+
+    @Column({ type: 'float', nullable: true })
+    oddsMax!: number;
+
+    // Valor padrão de aposta (stake) do filtro.
+    @Column({ type: 'float', nullable: true })
+    stake!: number;
+
     @Column('simple-array', { nullable: true })
     outcomes!: number[];
   

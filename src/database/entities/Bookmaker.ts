@@ -1,0 +1,59 @@
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  Index,
+  CreateDateColumn,
+  UpdateDateColumn
+} from 'typeorm';
+
+/**
+ * Casa de aposta cadastrada no ArbPrime. O `slug` é a CHAVE de ligação com o
+ * arbbetting_master: deve ser exatamente o identificador que ele já fornece
+ * (ex.: 'pinnacle', 'betano', 'superbet'). Com isso o frontend casa cada odd/
+ * evento ao registro e exibe ícone, nome amigável e cor da casa.
+ */
+@Entity('bookmakers')
+export class Bookmaker {
+  @PrimaryGeneratedColumn('uuid')
+  id!: string;
+
+  // Identificador da casa no arbbetting_master (ex.: 'pinnacle'). Único.
+  @Index('IDX_bookmaker_slug', { unique: true })
+  @Column()
+  slug!: string;
+
+  // Nome amigável para exibição (ex.: 'Pinnacle').
+  @Column()
+  name!: string;
+
+  // URL do logo/ícone da casa (https... ou caminho público).
+  @Column({ type: 'varchar', nullable: true })
+  logoUrl!: string | null;
+
+  // Cor de marca (hex ou classe), usada nos badges/realces.
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  color!: string | null;
+
+  // Site da casa (opcional).
+  @Column({ type: 'varchar', nullable: true })
+  url!: string | null;
+
+  // Slug da casa "mãe" quando esta casa é um CLONE (mesma operação/odds).
+  // Null = não é clone.
+  @Column({ type: 'varchar', nullable: true })
+  cloneOf!: string | null;
+
+  @Column({ default: true })
+  isActive!: boolean;
+
+  // Ordem de exibição (menor primeiro).
+  @Column({ type: 'int', default: 0 })
+  sortOrder!: number;
+
+  @CreateDateColumn()
+  createdAt!: Date;
+
+  @UpdateDateColumn()
+  updatedAt!: Date;
+}
