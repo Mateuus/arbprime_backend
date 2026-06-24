@@ -66,6 +66,15 @@ export class Proxy {
   @Column({ default: true })
   isEnabled!: boolean;
 
+  /**
+   * Escopo de uso: lista de slugs de casas (Bookmaker.slug) às quais este proxy
+   * fica restrito. Vazio/null = pool global (qualquer casa pode usar). Espelhado
+   * no Redis para o robô (arbbetting_master) filtrar o proxy por casa — usado, por
+   * ex., para reservar os residenciais (caros, por banda) só para a bet365.
+   */
+  @Column('simple-array', { nullable: true })
+  scope!: string[] | null;
+
   @Column({ type: 'text', nullable: true })
   comment!: string | null;
 

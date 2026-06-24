@@ -49,4 +49,11 @@ export class OddsEvent {
 
   @Column({ name: "last_seen_at", type: "datetime", default: () => "CURRENT_TIMESTAMP" })
   lastSeenAt!: Date;
+
+  // NÃO mirrorar `odds_events.group_id`: o arbbetting tem essa coluna no entity dele
+  // (carimbada pela odds-history a partir de event_group_members) mas com
+  // `synchronize:true` ela aparece/some conforme a versão do processo que está
+  // rodando — quando o mirror a declara e a coluna não existe, todo SELECT quebra
+  // com ER_BAD_FIELD_ERROR. O agrupamento do arbprime usa event_group_members
+  // (fonte canônica) via anti-join, então não dependemos dessa coluna denormalizada.
 }

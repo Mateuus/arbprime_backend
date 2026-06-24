@@ -28,7 +28,10 @@ export async function syncProxiesToRedis(): Promise<void> {
         login: p.login,
         password: p.password,
         isprivate: p.isPrivate,
-        isenabled: p.isEnabled
+        isenabled: p.isEnabled,
+        // Escopo por casa: vazio = pool global; não-vazio = só essas casas (slugs).
+        // O robô usa para reservar, ex., os residenciais só para a bet365.
+        scope: Array.isArray(p.scope) ? p.scope : []
       });
     }
 

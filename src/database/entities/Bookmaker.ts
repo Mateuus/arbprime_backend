@@ -27,8 +27,9 @@ export class Bookmaker {
   @Column()
   name!: string;
 
-  // URL do logo/ícone da casa (https... ou caminho público).
-  @Column({ type: 'varchar', nullable: true })
+  // Logo/ícone da casa: aceita URL (https...) OU um data URL (base64) quando a
+  // imagem é enviada/colada no cadastro. Por isso é `text` (não cabe em varchar).
+  @Column({ type: 'text', nullable: true })
   logoUrl!: string | null;
 
   // Cor de marca (hex ou classe), usada nos badges/realces.

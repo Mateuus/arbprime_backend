@@ -4,6 +4,10 @@ import { DataSource } from "typeorm";
 import { OddsEvent } from "./external/odds-event.entity";
 import { OddsCurrent } from "./external/odds-current.entity";
 import { OddsHistory } from "./external/odds-history.entity";
+import { EventGroup } from "./external/event-group.entity";
+import { EventGroupMember } from "./external/event-group-member.entity";
+import { League } from "./external/league.entity";
+import { LeagueAlias } from "./external/league-alias.entity";
 
 /**
  * DataSource SECUNDÁRIA, somente-leitura, apontando para o MySQL do
@@ -33,7 +37,7 @@ export const ExternalDataSource = new DataSource({
   database: databaseName,
   synchronize: false,
   logging: false,
-  entities: [OddsEvent, OddsCurrent, OddsHistory],
+  entities: [OddsEvent, OddsCurrent, OddsHistory, EventGroup, EventGroupMember, League, LeagueAlias],
   subscribers: [],
   migrations: []
 });

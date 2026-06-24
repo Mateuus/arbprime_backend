@@ -2,6 +2,7 @@ import { FastifyInstance } from "fastify";
 import {
   getExternalEvents,
   getGroupedEvents,
+  getEventFacets,
   getEventGroup,
   getExternalEventById,
   getExternalEventOdds,
@@ -18,6 +19,9 @@ export default async function externalEventsRoutes(app: FastifyInstance) {
 
   // GET /external/events/grouped — lista paginada AGRUPADA (1 item por evento real)
   app.get("/grouped", getGroupedEvents);
+
+  // GET /external/events/facets — esportes + campeonatos (sidebar)
+  app.get("/facets", getEventFacets);
 
   // GET /external/events/group/:bookmaker/:eventId — evento real (grupo) + comparação de odds entre casas
   app.get("/group/:bookmaker/:eventId", getEventGroup);

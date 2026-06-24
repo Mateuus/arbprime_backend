@@ -5,6 +5,12 @@ import { ensureExternalDb, ExternalDataSource } from "../database/external-data-
 import { OddsEvent } from "../database/external/odds-event.entity";
 import { OddsCurrent } from "../database/external/odds-current.entity";
 import { OddsHistory } from "../database/external/odds-history.entity";
+import { EventGroup } from "../database/external/event-group.entity";
+import { EventGroupMember } from "../database/external/event-group-member.entity";
+import { League } from "../database/external/league.entity";
+import { LeagueAlias } from "../database/external/league-alias.entity";
+import { getRedisClient, isRedisConnected } from "@Core/redis";
+import { normalizeName } from "@utils/functions";
 
 /**
  * Eventos vindos do banco do arbbetting_master (tabela `odds_events`), lidos via
@@ -20,46 +26,29 @@ const clampInt = (value: string | undefined, def: number, min: number, max: numb
 };
 
 // ---------------------------------------------------------------------------
-// Agrupamento INTERINO de eventos (até o canônico vir do arbbetting_master).
-// A chave usa o CONJUNTO ordenado dos times, então um evento com home/away
-// invertido entre casas cai no mesmo grupo automaticamente.
+// Normalização de nomes/handicap — usada só na MESCLA de odds entre casas (página
+// de detalhe). O AGRUPAMENTO de eventos NÃO é mais por nome cru: vem da matching
+// canônica do arbbetting_master (tabelas event_groups / event_group_members).
 // ---------------------------------------------------------------------------
 
 const normalizeTeam = (s: string | null | undefined): string =>
   (s || "")
     .toLowerCase()
-    .normalize("NFD")                 // separa acentos em combining marks
-    .replace(/[̀-ͯ]/g, "")  // remove os acentos (sem virar espaço): croácia -> croacia
-    .replace(/[^a-z0-9\s]/g, " ")     // pontuação -> espaço
+    .normalize("NFD")                       // separa acentos em combining marks
+    .replace(/[̀-ͯ]/g, "")        // remove os acentos: croácia -> croacia
+    .replace(/[^a-z0-9\s]/g, " ")           // pontuação -> espaço
     .replace(/\s+/g, " ")
     .trim();
 
-// Bucket por dia (em UTC) — consistente entre casas (todas guardam o mesmo datetime).
-const dayBucket = (d: Date | null): string => (d ? new Date(d).toISOString().slice(0, 10) : "na");
-
-const groupKeyOf = (e: OddsEvent): string => {
-  const teams = [normalizeTeam(e.home), normalizeTeam(e.away)].sort();
-  return `${e.sport}::${dayBucket(e.eventDate)}::${teams.join("::")}`;
+// Normaliza o handicap para a chave de seleção. Casas divergem em "sem linha":
+// umas gravam "" e outras "0"/"0.0"/"-0" para o MESMO mercado (ex.: Resultado Final
+// 1X2 — superbet/marjosports usam "0", betano/pinnacle usam ""). Sem isso a mesma
+// seleção vira duas e o frontend só mostra a 1ª casa. Linhas reais (2.5, -1.5) ficam.
+const normHandicap = (h: string | null | undefined): string => {
+  const t = (h ?? "").toString().trim();
+  if (t === "" || /^[+-]?0(\.0+)?$/.test(t)) return "";
+  return t;
 };
-
-interface GroupedHouse {
-  bookmaker: string;
-  eventId: string;
-  home: string;
-  away: string;
-  inverted: boolean;
-  link: string | null;
-}
-interface GroupedEvent {
-  key: string;
-  sport: string;
-  home: string;
-  away: string;
-  eventDate: Date | null;
-  league: string | null;
-  country: string | null;
-  houses: GroupedHouse[];
-}
 
 // Ordem de exibição dos mercados (igual casa de aposta). Resultado Final sempre 1º.
 // A prioridade é pelo slug (parte antes do ':'), então cobre os subIds variados.
@@ -88,58 +77,238 @@ const marketPriority = (marketId: string): number => {
   return i === -1 ? MARKET_SLUG_ORDER.length : i;
 };
 
-// Constrói os grupos a partir de uma lista de odds_events.
-// A orientação canônica (quem é mandante) segue a MAIORIA das casas — não a ordem
-// alfabética — para refletir o que as casas mostram. Só fica "inverted" quem destoa.
-function buildGroups(rows: OddsEvent[]): Map<string, GroupedEvent> {
-  // 1) Agrupa os membros crus por chave.
-  const groups = new Map<string, { sport: string; league: string | null; country: string | null; eventDate: Date | null; members: OddsEvent[] }>();
-  for (const e of rows) {
-    const key = groupKeyOf(e);
-    let g = groups.get(key);
-    if (!g) {
-      g = { sport: e.sport, league: e.league || e.leagueName || null, country: e.country || null, eventDate: e.eventDate, members: [] };
-      groups.set(key, g);
+// ---------------------------------------------------------------------------
+// Lista de eventos a partir da matching canônica (event_groups + membros).
+// ---------------------------------------------------------------------------
+
+interface GroupedHouse {
+  bookmaker: string;
+  eventId: string;
+  home: string;
+  away: string;
+  inverted: boolean;   // orientation === 'flipped' (mandante/visitante trocados nesta casa)
+  link: string | null;
+}
+interface GroupedEvent {
+  key: string;
+  sport: string;
+  home: string;
+  away: string;
+  eventDate: Date | null;
+  league: string | null;      // nome canônico da liga (fallback: nome cru)
+  country: string | null;     // país canônico (via leagues); null se não resolvido
+  countryKey: string | null;  // chave do país (ex.: "br"); null se não resolvido
+  leagueId: string | null;
+  status: string;      // 'active' | 'review' (grupos) | 'solo' (evento de 1 casa, não casado)
+  houses: GroupedHouse[];
+}
+
+interface LeagueMeta { canonicalName: string; country: string | null; countryKey: string | null }
+
+/**
+ * Carrega leagues + league_aliases (read) e devolve um resolvedor: dado um
+ * league_id já conhecido (grupos têm), ou um (sport, casa, nome cru) (solitários),
+ * resolve para a meta canônica da liga (nome + país + country_key). Espelha a
+ * resolução do LeagueAliasManager do master: chave `${sport}|${bookmaker}|${norm}`
+ * com fallback global `${sport}||${norm}`.
+ */
+async function loadLeagueResolver(): Promise<{
+  metaById: Map<string, LeagueMeta>;
+  resolve: (sport: string, bookmaker: string, rawLeague: string | null, knownLeagueId?: string | null) => string | null;
+}> {
+  const [leagues, aliases] = await Promise.all([
+    ExternalDataSource.getRepository(League).find(),
+    ExternalDataSource.getRepository(LeagueAlias).find(),
+  ]);
+  const metaById = new Map<string, LeagueMeta>();
+  for (const l of leagues) metaById.set(String(l.id), { canonicalName: l.canonicalName, country: l.country, countryKey: l.countryKey });
+  const aliasMap = new Map<string, string>();
+  for (const a of aliases) aliasMap.set(`${a.sport}|${a.bookmaker || ""}|${a.aliasNorm}`, String(a.leagueId));
+  const resolve = (sport: string, bookmaker: string, rawLeague: string | null, knownLeagueId?: string | null): string | null => {
+    if (knownLeagueId) return String(knownLeagueId);
+    const norm = normalizeName(rawLeague || "");
+    if (!norm) return null;
+    // Casa em minúsculo: os aliases são gravados lowercased; sem isso, um bookmaker
+    // com maiúscula no odds_events não casaria a chave e cairia em "Sem país".
+    const bk = (bookmaker || "").toLowerCase();
+    return aliasMap.get(`${sport}|${bk}|${norm}`) ?? aliasMap.get(`${sport}||${norm}`) ?? null;
+  };
+  return { metaById, resolve };
+}
+
+const memberToHouse = (m: EventGroupMember): GroupedHouse => ({
+  bookmaker: m.bookmaker,
+  eventId: m.eventId,
+  home: m.home,
+  away: m.away,
+  inverted: m.orientation === "flipped",
+  link: m.link
+});
+
+interface GroupFilters {
+  sport?: string;
+  search?: string;
+  upcomingOnly?: boolean;
+  pastOnly?: boolean;
+  dateFrom?: string;
+  dateTo?: string;
+}
+
+// Teto de linhas carregadas (proteção; o catálogo casado é pequeno).
+const ROW_CAP = 20000;
+
+/**
+ * Carrega a lista de eventos JÁ DEDUPLICADA entre casas, unindo:
+ *  1) event_groups — 1 item por jogo real casado — + seus membros (cada casa);
+ *  2) "solitários": odds_events que NÃO pertencem a nenhum grupo (1 casa só),
+ *     via anti-join por (bookmaker, event_id) em event_group_members. (Não usamos
+ *     odds_events.group_id porque o arbbetting ainda não o carimba.)
+ * Aplica os filtros em ambas as fontes. O filtro por casa e a paginação ficam a
+ * cargo do chamador (sobre a lista unificada) para manter as contagens corretas.
+ */
+async function loadGroupedItems(f: GroupFilters): Promise<GroupedEvent[]> {
+  const like = (v: string) => `%${v}%`;
+  const lr = await loadLeagueResolver();
+  // Resolve liga canônica + país de um item (grupos têm league_id; solitários
+  // resolvem pelo nome cru + casa). Liga não resolvida → país null (cai em "Sem país").
+  const enrich = (sport: string, bookmaker: string, rawLeague: string | null, knownLeagueId?: string | null) => {
+    const lid = lr.resolve(sport, bookmaker, rawLeague, knownLeagueId);
+    const meta = lid ? lr.metaById.get(lid) : null;
+    const countryKey = meta?.countryKey ?? null;
+    return {
+      leagueId: lid,
+      league: meta?.canonicalName ?? rawLeague,
+      // País só quando há country_key — senão a liga apareceria rotulada por país
+      // mas dentro do balde "Sem país" (e inalcançável a não ser por __none__).
+      country: countryKey ? (meta?.country ?? null) : null,
+      countryKey,
+    };
+  };
+
+  // 1) Grupos canônicos (jogos reais). active + review são jogos de verdade.
+  const gqb = ExternalDataSource.getRepository(EventGroup).createQueryBuilder("g")
+    .where("g.status IN (:...statuses)", { statuses: ["active", "review"] });
+  if (f.sport) gqb.andWhere("g.sport = :sport", { sport: f.sport });
+  if (f.search) {
+    const s = like(f.search);
+    gqb.andWhere(new Brackets((w) => {
+      w.where("g.canonicalHome LIKE :s", { s })
+        .orWhere("g.canonicalAway LIKE :s", { s })
+        .orWhere("g.league LIKE :s", { s })
+        .orWhere("g.country LIKE :s", { s });
+    }));
+  }
+  if (f.upcomingOnly) gqb.andWhere("g.eventDate >= NOW()");
+  if (f.pastOnly) gqb.andWhere("g.eventDate < NOW()");
+  if (f.dateFrom) gqb.andWhere("g.eventDate >= :dateFrom", { dateFrom: f.dateFrom });
+  if (f.dateTo) gqb.andWhere("g.eventDate <= :dateTo", { dateTo: f.dateTo });
+
+  const groups = await gqb.orderBy("g.eventDate", "ASC").take(ROW_CAP).getMany();
+
+  // Membros de todos os grupos carregados (1 query só).
+  const membersByGroup = new Map<string, EventGroupMember[]>();
+  if (groups.length) {
+    const members = await ExternalDataSource.getRepository(EventGroupMember).createQueryBuilder("m")
+      .where("m.groupId IN (:...ids)", { ids: groups.map((g) => g.id) })
+      .andWhere("m.disabled = 0")
+      .getMany();
+    for (const m of members) {
+      const list = membersByGroup.get(m.groupId);
+      if (list) list.push(m);
+      else membersByGroup.set(m.groupId, [m]);
     }
-    if (!g.league && (e.league || e.leagueName)) g.league = e.league || e.leagueName;
-    if (!g.country && e.country) g.country = e.country;
-    g.members.push(e);
   }
 
-  // 2) Finaliza: orientação canônica = mandante mais frequente entre as casas.
-  const out = new Map<string, GroupedEvent>();
-  for (const [key, g] of groups) {
-    const homeCount = new Map<string, number>();
-    for (const e of g.members) {
-      const nh = normalizeTeam(e.home);
-      homeCount.set(nh, (homeCount.get(nh) || 0) + 1);
-    }
-    // empate no critério → desempata pela ordem alfabética (determinístico).
-    let canonHomeNorm = '', best = -1;
-    for (const [nh, c] of homeCount) {
-      if (c > best || (c === best && nh < canonHomeNorm)) { best = c; canonHomeNorm = nh; }
-    }
-    const rep = g.members.find((e) => normalizeTeam(e.home) === canonHomeNorm) || g.members[0];
-
-    out.set(key, {
-      key,
+  const groupItems: GroupedEvent[] = groups
+    .map((g): GroupedEvent => ({
+      key: `g:${g.id}`,
       sport: g.sport,
-      home: rep.home,
-      away: rep.away,
+      home: g.canonicalHome,
+      away: g.canonicalAway,
       eventDate: g.eventDate,
-      league: g.league,
-      country: g.country,
-      houses: g.members.map((e) => ({
-        bookmaker: e.bookmaker,
-        eventId: e.eventId,
-        home: e.home,
-        away: e.away,
-        inverted: normalizeTeam(e.home) !== canonHomeNorm,
-        link: e.link
-      }))
-    });
+      ...enrich(g.sport, "", g.league, g.leagueId),
+      status: g.status,
+      houses: (membersByGroup.get(g.id) || []).map(memberToHouse)
+    }))
+    // Grupo sem membros ativos não deve aparecer (defensivo).
+    .filter((g) => g.houses.length > 0);
+
+  // 2) Solitários: odds_events fora de qualquer grupo (anti-join por membro).
+  const sqb = ExternalDataSource.getRepository(OddsEvent).createQueryBuilder("e")
+    .leftJoin(EventGroupMember, "m", "m.bookmaker = e.bookmaker AND m.eventId = e.eventId")
+    .where("m.id IS NULL");
+  if (f.sport) sqb.andWhere("e.sport = :sport", { sport: f.sport });
+  if (f.search) {
+    const s = like(f.search);
+    sqb.andWhere(new Brackets((w) => {
+      w.where("e.home LIKE :s", { s })
+        .orWhere("e.away LIKE :s", { s })
+        .orWhere("e.league LIKE :s", { s })
+        .orWhere("e.leagueName LIKE :s", { s });
+    }));
   }
-  return out;
+  if (f.upcomingOnly) sqb.andWhere("e.eventDate >= NOW()");
+  if (f.pastOnly) sqb.andWhere("e.eventDate < NOW()");
+  if (f.dateFrom) sqb.andWhere("e.eventDate >= :dateFrom", { dateFrom: f.dateFrom });
+  if (f.dateTo) sqb.andWhere("e.eventDate <= :dateTo", { dateTo: f.dateTo });
+
+  const solos = await sqb.orderBy("e.eventDate", "ASC").take(ROW_CAP).getMany();
+
+  const soloItems: GroupedEvent[] = solos.map((e): GroupedEvent => ({
+    key: `s:${e.bookmaker}:${e.eventId}`,
+    sport: e.sport,
+    home: e.home,
+    away: e.away,
+    eventDate: e.eventDate,
+    ...enrich(e.sport, e.bookmaker, e.league || e.leagueName, null),
+    status: "solo",
+    houses: [{ bookmaker: e.bookmaker, eventId: e.eventId, home: e.home, away: e.away, inverted: false, link: e.link }]
+  }));
+
+  return groupItems.concat(soloItems);
+}
+
+// ---------------------------------------------------------------------------
+// Boosted (Super Placar / Super Odds). O flag é POR ODD e hoje só existe no
+// Redis (hash de mercados por casa) — ainda não é persistido em odds_current.
+// Montamos um Set de chaves boosted lendo o Redis e fazemos overlay no merge de
+// odds da página de detalhe.
+// ---------------------------------------------------------------------------
+
+const normSel = (s: string | null | undefined): string => (s ?? "").toString().toLowerCase().trim();
+
+// Chave estável de uma odd: casa|evento|marketId|seleção|handicap (handicap
+// normalizado igual ao merge — "0"/"-0"/"" colapsam, linhas reais ficam).
+const oddKey = (bookmaker: string, eventId: string, marketId: string, selection: string, handicap: string | number | null | undefined): string =>
+  `${bookmaker}|${eventId}|${marketId}|${normSel(selection)}|${normHandicap(handicap == null ? "" : String(handicap))}`;
+
+/**
+ * Lê do Redis (best-effort) o conjunto de odds com `boosted:true` das casas do
+ * grupo. Estrutura: hash `ArbBetting:Markets:Futebol:{casa}:{eventId}`, em que
+ * cada field é o marketId e o valor é o JSON do mercado
+ * ({ odds:[{ name, price, handicap, boosted }] }). Falha de Redis NÃO derruba o
+ * detalhe — só volta vazio (sem badge boosted).
+ */
+async function loadBoostedKeys(houses: GroupedHouse[]): Promise<Set<string>> {
+  const keys = new Set<string>();
+  if (!isRedisConnected()) return keys;
+  try {
+    const redis = getRedisClient();
+    for (const house of houses) {
+      const hash = await redis.hgetall(`ArbBetting:Markets:Futebol:${house.bookmaker}:${house.eventId}`);
+      for (const [marketId, json] of Object.entries(hash)) {
+        let parsed: { odds?: Array<{ name?: string; handicap?: number | string; boosted?: boolean }> };
+        try { parsed = JSON.parse(json); } catch { continue; }
+        if (!Array.isArray(parsed.odds)) continue;
+        for (const od of parsed.odds) {
+          if (od && od.boosted) keys.add(oddKey(house.bookmaker, house.eventId, marketId, od.name ?? "", od.handicap));
+        }
+      }
+    }
+  } catch {
+    /* boosted é best-effort: qualquer erro de Redis = sem badge, sem quebrar o detalhe */
+  }
+  return keys;
 }
 
 // Tenta inicializar a conexão externa; em falha, devolve a resposta 503 já formatada.
@@ -226,51 +395,38 @@ export const getGroupedEvents = async (req: FastifyRequest, reply: FastifyReply)
   if (!(await withExternalDb(reply))) return;
 
   const {
-    page, limit, bookmaker = "", sport = "", league = "",
+    page, limit, bookmaker = "", sport = "", countryKey = "", leagueId = "",
     search = "", dateFrom = "", dateTo = "", upcomingOnly = "", pastOnly = "", sort = "asc"
   } = req.query as Record<string, string>;
 
   const pageNum = clampInt(page, 1, 1, 1_000_000);
   const limitNum = clampInt(limit, 20, 1, 100);
-  // Teto de linhas carregadas para o agrupamento em memória (interino).
-  const ROW_CAP = 20000;
 
   try {
-    const qb = ExternalDataSource.getRepository(OddsEvent).createQueryBuilder("e");
+    let items = await loadGroupedItems({
+      sport, search,
+      upcomingOnly: upcomingOnly === "true",
+      pastOnly: pastOnly === "true",
+      dateFrom, dateTo
+    });
 
-    // Obs: NÃO filtra por bookmaker aqui (senão o grupo perderia as outras casas).
-    if (sport) qb.andWhere("e.sport = :sport", { sport });
-    if (league) qb.andWhere("(e.league LIKE :lg OR e.leagueName LIKE :lg)", { lg: `%${league}%` });
-    if (search) {
-      qb.andWhere(
-        new Brackets((w) => {
-          w.where("e.home LIKE :s", { s: `%${search}%` })
-            .orWhere("e.away LIKE :s", { s: `%${search}%` })
-            .orWhere("e.league LIKE :s", { s: `%${search}%` })
-            .orWhere("e.leagueName LIKE :s", { s: `%${search}%` });
-        })
-      );
-    }
-    if (upcomingOnly === "true") qb.andWhere("e.eventDate >= NOW()");
-    if (pastOnly === "true") qb.andWhere("e.eventDate < NOW()");
-    if (dateFrom) qb.andWhere("e.eventDate >= :dateFrom", { dateFrom });
-    if (dateTo) qb.andWhere("e.eventDate <= :dateTo", { dateTo });
-
-    const rows = await qb.orderBy("e.eventDate", "ASC").take(ROW_CAP).getMany();
-
-    let groups = Array.from(buildGroups(rows).values());
-    if (bookmaker) groups = groups.filter((g) => g.houses.some((h) => h.bookmaker === bookmaker));
+    // Filtro por casa: mantém só eventos que contêm aquela casa (em qualquer membro).
+    if (bookmaker) items = items.filter((g) => g.houses.some((h) => h.bookmaker === bookmaker));
+    // Filtro por país/liga canônicos (sidebar). "__none__" = eventos sem país resolvido.
+    if (countryKey === "__none__") items = items.filter((g) => !g.countryKey);
+    else if (countryKey) items = items.filter((g) => g.countryKey === countryKey);
+    if (leagueId) items = items.filter((g) => String(g.leagueId || "") === leagueId);
 
     const dir = sort.toLowerCase() === "desc" ? -1 : 1;
-    groups.sort((a, b) => {
+    items.sort((a, b) => {
       const ta = a.eventDate ? new Date(a.eventDate).getTime() : 0;
       const tb = b.eventDate ? new Date(b.eventDate).getTime() : 0;
       return (ta - tb) * dir;
     });
 
-    const totalItems = groups.length;
+    const totalItems = items.length;
     const totalPages = Math.ceil(totalItems / limitNum);
-    const pageSlice = groups.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+    const pageSlice = items.slice((pageNum - 1) * limitNum, pageNum * limitNum);
 
     return reply.send(
       createResponse(1, "Eventos agrupados carregados com sucesso.", {
@@ -291,6 +447,65 @@ export const getGroupedEvents = async (req: FastifyRequest, reply: FastifyReply)
 };
 
 /**
+ * GET /external/events/facets — esportes presentes (com campeonatos e contagem)
+ * para a sidebar estilo casa de aposta. Conta EVENTOS (grupos), não linhas.
+ * Query: upcomingOnly, pastOnly.
+ */
+export const getEventFacets = async (req: FastifyRequest, reply: FastifyReply) => {
+  if (!(await withExternalDb(reply))) return;
+  const { upcomingOnly = "", pastOnly = "" } = req.query as Record<string, string>;
+
+  try {
+    // Mesma fonte da lista (grupos canônicos + solitários) para contagens coerentes.
+    const items = await loadGroupedItems({
+      upcomingOnly: upcomingOnly === "true",
+      pastOnly: pastOnly === "true"
+    });
+
+    // Esporte → País → Liga (campeonatos canônicos). "Sem país" agrupa o que
+    // ainda não tem country_key resolvido.
+    const sportsMap = new Map<string, {
+      count: number;
+      countries: Map<string, { countryKey: string | null; country: string | null; count: number; leagues: Map<string, { leagueId: string | null; league: string; count: number }> }>;
+    }>();
+    for (const g of items) {
+      const s = g.sport || "outros";
+      if (!sportsMap.has(s)) sportsMap.set(s, { count: 0, countries: new Map() });
+      const sm = sportsMap.get(s)!;
+      sm.count++;
+      const ck = g.countryKey || ""; // "" = sem país
+      if (!sm.countries.has(ck)) sm.countries.set(ck, { countryKey: g.countryKey || null, country: g.country || null, count: 0, leagues: new Map() });
+      const cm = sm.countries.get(ck)!;
+      cm.count++;
+      if (!cm.country && g.country) cm.country = g.country;
+      const lkey = g.leagueId ? `id:${g.leagueId}` : `raw:${g.league || "Outros"}`;
+      if (!cm.leagues.has(lkey)) cm.leagues.set(lkey, { leagueId: g.leagueId || null, league: g.league || "Outros", count: 0 });
+      cm.leagues.get(lkey)!.count++;
+    }
+
+    const sports = Array.from(sportsMap.entries())
+      .map(([sport, v]) => ({
+        sport,
+        count: v.count,
+        countries: Array.from(v.countries.values())
+          .map((c) => ({
+            countryKey: c.countryKey,
+            country: c.country,
+            count: c.count,
+            leagues: Array.from(c.leagues.values()).sort((a, b) => b.count - a.count || a.league.localeCompare(b.league, "pt-BR"))
+          }))
+          // "Sem país" por último; demais por contagem desc.
+          .sort((a, b) => (a.countryKey ? 0 : 1) - (b.countryKey ? 0 : 1) || b.count - a.count)
+      }))
+      .sort((a, b) => b.count - a.count);
+
+    return reply.send(createResponse(1, "Facets carregados.", { sports }));
+  } catch (error) {
+    return reply.code(500).send(createResponse(0, `Erro ao carregar facets: ${(error as Error).message}`, []));
+  }
+};
+
+/**
  * GET /external/events/group/:bookmaker/:eventId
  * Resolve o grupo (evento real) ao qual o evento pertence e devolve:
  *  - evento canônico (orientação canônica)
@@ -301,42 +516,70 @@ export const getEventGroup = async (req: FastifyRequest, reply: FastifyReply) =>
   if (!(await withExternalDb(reply))) return;
 
   const { bookmaker, eventId } = req.params as { bookmaker: string; eventId: string };
-  const eventRepo = ExternalDataSource.getRepository(OddsEvent);
 
   try {
-    const base = await eventRepo.findOne({ where: { bookmaker, eventId } });
-    if (!base) return reply.code(404).send(createResponse(0, "Evento não encontrado.", []));
+    const memberRepo = ExternalDataSource.getRepository(EventGroupMember);
 
-    const baseKey = groupKeyOf(base);
+    // Resolve o evento canônico a partir de QUALQUER casa (bookmaker, eventId):
+    // 1) se a casa é membro de um grupo, usa o grupo (canonical_home/away + todas as casas);
+    // 2) senão, é um evento solitário (1 casa) — monta um "grupo" de 1 casa.
+    const member = await memberRepo.findOne({ where: { bookmaker, eventId } });
 
-    // Candidatos do mesmo dia (ou, sem data, por nome de time) e filtra pela chave de grupo.
-    let candQb = eventRepo.createQueryBuilder("e").where("e.sport = :sport", { sport: base.sport });
-    if (base.eventDate) {
-      const start = new Date(base.eventDate); start.setUTCHours(0, 0, 0, 0);
-      const end = new Date(start); end.setUTCDate(end.getUTCDate() + 1);
-      candQb = candQb.andWhere("e.eventDate >= :start AND e.eventDate < :end", { start, end });
+    const lr = await loadLeagueResolver();
+    let event: { sport: string; home: string; away: string; eventDate: Date | null; league: string | null; country: string | null; countryKey: string | null };
+    let houses: GroupedHouse[];
+
+    if (member) {
+      const group = await ExternalDataSource.getRepository(EventGroup).findOne({ where: { id: member.groupId } });
+      if (!group) return reply.code(404).send(createResponse(0, "Grupo do evento não encontrado.", []));
+      const members = await memberRepo.find({ where: { groupId: group.id, disabled: 0 } });
+      const lid = lr.resolve(group.sport, "", group.league, group.leagueId);
+      const meta = lid ? lr.metaById.get(lid) : null;
+      const ck = meta?.countryKey ?? null;
+      event = {
+        sport: group.sport,
+        home: group.canonicalHome,
+        away: group.canonicalAway,
+        eventDate: group.eventDate,
+        league: meta?.canonicalName ?? group.league,
+        country: ck ? (meta?.country ?? null) : null,
+        countryKey: ck
+      };
+      houses = members.map(memberToHouse);
     } else {
-      candQb = candQb.andWhere(
-        new Brackets((w) => {
-          w.where("e.home IN (:...names)", { names: [base.home, base.away] })
-            .orWhere("e.away IN (:...names)", { names: [base.home, base.away] });
-        })
-      );
+      const ev = await ExternalDataSource.getRepository(OddsEvent).findOne({ where: { bookmaker, eventId } });
+      if (!ev) return reply.code(404).send(createResponse(0, "Evento não encontrado.", []));
+      const lid = lr.resolve(ev.sport, ev.bookmaker, ev.league || ev.leagueName, null);
+      const meta = lid ? lr.metaById.get(lid) : null;
+      const ck = meta?.countryKey ?? null;
+      event = {
+        sport: ev.sport,
+        home: ev.home,
+        away: ev.away,
+        eventDate: ev.eventDate,
+        league: meta?.canonicalName ?? (ev.league || ev.leagueName),
+        country: ck ? (meta?.country ?? null) : null,
+        countryKey: ck
+      };
+      houses = [{ bookmaker: ev.bookmaker, eventId: ev.eventId, home: ev.home, away: ev.away, inverted: false, link: ev.link }];
     }
-    const candidates = (await candQb.take(2000).getMany()).filter((e) => groupKeyOf(e) === baseKey);
 
-    const group = buildGroups(candidates).get(baseKey);
-    if (!group) return reply.code(404).send(createResponse(0, "Grupo do evento não encontrado.", []));
+    // Conjunto de odds boosted (Super Placar/Super Odds) lido do Redis — flag por
+    // odd que ainda não vem no odds_current. Best-effort: sem Redis = sem boosted.
+    const boostedKeys = await loadBoostedKeys(houses);
 
     // Carrega odds_current de cada casa e mescla por (marketId, seleção normalizada, handicap).
+    // Obs.: a canonicalização das odds quando orientation='flipped' (swap de seleções
+    // mandante/visitante) é responsabilidade do arbbetting_master; aqui só repassamos
+    // `inverted` como metadado por preço.
     const oddsRepo = ExternalDataSource.getRepository(OddsCurrent);
     const marketsMap = new Map<string, {
       marketId: string;
       marketName: string | null;
-      selections: Map<string, { selection: string; handicap: string; prices: Array<{ bookmaker: string; eventId: string; price: number; inverted: boolean }> }>;
+      selections: Map<string, { selection: string; handicap: string; prices: Array<{ bookmaker: string; eventId: string; price: number; inverted: boolean; boosted: boolean }> }>;
     }>();
 
-    for (const house of group.houses) {
+    for (const house of houses) {
       const odds = await oddsRepo.find({ where: { bookmaker: house.bookmaker, eventId: house.eventId } });
       for (const o of odds) {
         let m = marketsMap.get(o.marketId);
@@ -345,13 +588,14 @@ export const getEventGroup = async (req: FastifyRequest, reply: FastifyReply) =>
           marketsMap.set(o.marketId, m);
         }
         if (!m.marketName && o.marketName) m.marketName = o.marketName;
-        const selKey = `${normalizeTeam(o.selection)}|${o.handicap || ""}`;
+        const selKey = `${normalizeTeam(o.selection)}|${normHandicap(o.handicap)}`;
         let sel = m.selections.get(selKey);
         if (!sel) {
           sel = { selection: o.selection, handicap: o.handicap, prices: [] };
           m.selections.set(selKey, sel);
         }
-        sel.prices.push({ bookmaker: house.bookmaker, eventId: house.eventId, price: o.price, inverted: house.inverted });
+        const boosted = boostedKeys.has(oddKey(house.bookmaker, house.eventId, o.marketId, o.selection, o.handicap));
+        sel.prices.push({ bookmaker: house.bookmaker, eventId: house.eventId, price: o.price, inverted: house.inverted, boosted });
       }
     }
 
@@ -370,15 +614,8 @@ export const getEventGroup = async (req: FastifyRequest, reply: FastifyReply) =>
 
     return reply.send(
       createResponse(1, "Grupo do evento carregado com sucesso.", {
-        event: {
-          sport: group.sport,
-          home: group.home,
-          away: group.away,
-          eventDate: group.eventDate,
-          league: group.league,
-          country: group.country
-        },
-        houses: group.houses,
+        event,
+        houses,
         markets
       })
     );

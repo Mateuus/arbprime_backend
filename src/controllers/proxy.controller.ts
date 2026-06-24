@@ -2,10 +2,15 @@ import { FastifyRequest, FastifyReply } from "fastify";
 import { DeepPartial } from "typeorm";
 import axios from "axios";
 import { SocksProxyAgent } from "socks-proxy-agent";
+import { HttpsProxyAgent } from "https-proxy-agent";
 import { AppDataSource } from "@Database";
 import { Proxy } from "@Entities";
 import { createResponse } from "@utils/resFormatter";
-import { fetchProxySellerList, ProxySellerType, ProxySellerProxy } from "@Services/proxyseller.service";
+import {
+  fetchProxySellerList, ProxySellerType, ProxySellerProxy,
+  getResidentPackage, getResidentLists, downloadResidentList,
+  renameResidentList, deleteResidentList, createResidentList, getResidentGeoCountries
+} from "@Services/proxyseller.service";
 import { syncProxiesToRedis } from "@Core/proxyManager";
 
 const proxyRepository = AppDataSource.getRepository(Proxy);
@@ -40,6 +45,21 @@ function parseProxyLine(line: string): { ip: string; port: number; login: string
 
   if (!ip || !portStr || !Number.isInteger(port) || port <= 0 || port > 65535) return null;
   return { ip, port, login, password };
+}
+
+// Normaliza o escopo (lista de slugs de casas): aceita array ou string CSV;
+// devolve null para "pool global" (vazio) ou um array de slugs únicos e limpos.
+function normalizeScope(raw: unknown): string[] | null {
+  let arr: string[];
+  if (Array.isArray(raw)) {
+    arr = raw.map((s) => String(s));
+  } else if (typeof raw === "string") {
+    arr = raw.split(",");
+  } else {
+    return null;
+  }
+  const clean = Array.from(new Set(arr.map((s) => s.trim().toLowerCase()).filter(Boolean)));
+  return clean.length ? clean : null;
 }
 
 // Mapeia um proxy cru do Proxy-Seller para o formato da entidade.
@@ -143,6 +163,7 @@ export const addProxy = async (req: FastifyRequest, reply: FastifyReply) => {
   const body = (req.body || {}) as {
     ip?: string; port?: number | string; protocol?: string; ipType?: string;
     login?: string; password?: string; isPrivate?: boolean; comment?: string;
+    scope?: string[] | string;
   };
 
   if (!body.ip || body.port == null || body.port === "") {
@@ -160,6 +181,7 @@ export const addProxy = async (req: FastifyRequest, reply: FastifyReply) => {
       password: body.password || "",
       isPrivate: body.isPrivate ?? true,
       isEnabled: true,
+      scope: normalizeScope(body.scope),
       comment: body.comment || null
     });
     await proxyRepository.save(proxy);
@@ -172,7 +194,7 @@ export const addProxy = async (req: FastifyRequest, reply: FastifyReply) => {
 
 // POST /proxy/bulk { list, protocol? } — importa vários proxies (login:senha@ip:porta por linha)
 export const bulkAddProxies = async (req: FastifyRequest, reply: FastifyReply) => {
-  const body = (req.body || {}) as { list?: string; protocol?: string };
+  const body = (req.body || {}) as { list?: string; protocol?: string; scope?: string[] | string };
 
   if (!body.list || typeof body.list !== "string" || !body.list.trim()) {
     return reply.code(400).send(
@@ -181,6 +203,7 @@ export const bulkAddProxies = async (req: FastifyRequest, reply: FastifyReply) =
   }
 
   const defaultProtocol = body.protocol || "http";
+  const scope = normalizeScope(body.scope);
   const lines = body.list.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
 
   let added = 0;
@@ -213,7 +236,8 @@ export const bulkAddProxies = async (req: FastifyRequest, reply: FastifyReply) =
         login,
         password,
         isPrivate: true,
-        isEnabled: true
+        isEnabled: true,
+        scope
       });
       await proxyRepository.save(proxy);
       added++;
@@ -253,6 +277,10 @@ export const updateProxy = async (req: FastifyRequest, reply: FastifyReply) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (proxy as any)[key] = (body as any)[key];
       }
+    }
+    // Escopo por casa precisa de normalização (array/CSV → array de slugs ou null).
+    if ("scope" in body) {
+      proxy.scope = normalizeScope(body.scope);
     }
 
     await proxyRepository.save(proxy);
@@ -298,34 +326,26 @@ async function runProxyCheck(proxy: Proxy): Promise<{
   message: string;
 }> {
   const start = Date.now();
-  const auth = proxy.login ? { username: proxy.login, password: proxy.password } : undefined;
   const isSocks = proxy.protocol === "socks5" || proxy.protocol === "socks";
+  const cred = proxy.login ? `${encodeURIComponent(proxy.login)}:${encodeURIComponent(proxy.password)}@` : "";
+  const host = proxy.ip.includes(":") ? `[${proxy.ip}]` : proxy.ip;
 
   try {
-    let response;
-    if (isSocks) {
-      const cred = proxy.login ? `${encodeURIComponent(proxy.login)}:${encodeURIComponent(proxy.password)}@` : "";
-      const host = proxy.ip.includes(":") ? `[${proxy.ip}]` : proxy.ip;
-      const agent = new SocksProxyAgent(`socks5://${cred}${host}:${proxy.port}`);
-      response = await axios.get(TEST_TARGET_URL, {
-        httpAgent: agent,
-        httpsAgent: agent,
-        proxy: false,
-        timeout: TEST_TIMEOUT_MS,
-        responseType: "text"
-      });
-    } else {
-      response = await axios.get(TEST_TARGET_URL, {
-        proxy: {
-          host: proxy.ip,
-          port: proxy.port,
-          auth,
-          protocol: proxy.protocol === "https" ? "https" : "http"
-        },
-        timeout: TEST_TIMEOUT_MS,
-        responseType: "text"
-      });
-    }
+    // Proxies HTTP/HTTPS são proxies de ENCAMINHAMENTO: conecta-se a eles por HTTP
+    // e o agente faz CONNECT para o alvo HTTPS. O proxy nativo do axios tenta um TLS
+    // contra o próprio proxy quando protocol='https' e quebra (ex.: gateway residencial
+    // do Proxy-Seller, que é HTTP). Por isso usamos sempre um agent (http/socks).
+    const agent = isSocks
+      ? new SocksProxyAgent(`socks5://${cred}${host}:${proxy.port}`)
+      : new HttpsProxyAgent(`http://${cred}${host}:${proxy.port}`);
+
+    const response = await axios.get(TEST_TARGET_URL, {
+      httpAgent: agent,
+      httpsAgent: agent,
+      proxy: false,
+      timeout: TEST_TIMEOUT_MS,
+      responseType: "text"
+    });
 
     const latencyMs = Date.now() - start;
     const exitIp = typeof response.data === "string" ? response.data.trim() : null;
@@ -352,6 +372,187 @@ export const testProxy = async (req: FastifyRequest, reply: FastifyReply) => {
     return reply.send(createResponse(result.ok ? 1 : 0, result.message, result));
   } catch (error) {
     return reply.code(500).send(createResponse(0, "Erro ao testar proxy.", { error: (error as Error).message }));
+  }
+};
+
+/////////////////////////////// Residencial (Proxy-Seller) ///////////////////////////////
+
+// GET /proxy/resident/package — banda restante, expiração e rotação do pacote residencial
+export const residentPackageInfo = async (_req: FastifyRequest, reply: FastifyReply) => {
+  try {
+    const pkg = await getResidentPackage();
+    return reply.send(createResponse(1, "Pacote residencial carregado.", pkg));
+  } catch (error) {
+    return reply.code(500).send(
+      createResponse(0, `Erro ao buscar pacote residencial: ${(error as Error).message}`, { error: (error as Error).message })
+    );
+  }
+};
+
+// GET /proxy/resident/lists — listas (sheets) existentes no pacote residencial
+export const residentListsInfo = async (_req: FastifyRequest, reply: FastifyReply) => {
+  try {
+    const lists = await getResidentLists();
+    return reply.send(createResponse(1, "Listas residenciais carregadas.", lists));
+  } catch (error) {
+    return reply.code(500).send(
+      createResponse(0, `Erro ao buscar listas residenciais: ${(error as Error).message}`, { error: (error as Error).message })
+    );
+  }
+};
+
+// Mapeia o protocolo enviado pelo front para o aceito pelo proxyDownload ('' = http).
+function residentProto(proto?: string): "" | "https" | "socks5" {
+  return proto === "https" || proto === "socks5" ? proto : "";
+}
+
+// POST /proxy/resident/import { listId, proto?, scope?, title? }
+// Baixa os endpoints de uma lista residencial e faz upsert no pool de proxies.
+export const importResidentList = async (req: FastifyRequest, reply: FastifyReply) => {
+  const body = (req.body || {}) as { listId?: number | string; proto?: string; scope?: string[] | string; title?: string };
+
+  if (body.listId == null || body.listId === "") {
+    return reply.code(400).send(createResponse(0, "Campo 'listId' é obrigatório.", []));
+  }
+
+  const proto = residentProto(body.proto);
+  const protocol = proto || "http";
+  const scope = normalizeScope(body.scope);
+  const comment = body.title ? `Residencial — ${body.title}` : "Residencial";
+
+  try {
+    const raw = await downloadResidentList(body.listId, proto);
+    const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+
+    let created = 0;
+    let updated = 0;
+    let invalid = 0;
+
+    for (const line of lines) {
+      const parsed = parseProxyLine(line);
+      if (!parsed) {
+        invalid++;
+        continue;
+      }
+      const { ip, port, login, password } = parsed;
+      // externalId estável por (lista, ip, porta) → reimportar é idempotente.
+      const externalId = `resident-${body.listId}-${ip}-${port}`;
+
+      const fields: DeepPartial<Proxy> = {
+        provider: "proxy-seller",
+        externalId,
+        protocol,
+        ipType: "resident",
+        ip,
+        port,
+        login,
+        password,
+        isPrivate: true,
+        scope,
+        comment
+      };
+
+      const existing = await proxyRepository.findOneBy({ provider: "proxy-seller", externalId });
+      if (existing) {
+        proxyRepository.merge(existing, fields);
+        await proxyRepository.save(existing);
+        updated++;
+      } else {
+        await proxyRepository.save(proxyRepository.create({ ...fields, isEnabled: true }));
+        created++;
+      }
+    }
+
+    await syncProxiesToRedis();
+
+    return reply.send(
+      createResponse(
+        1,
+        `Lista residencial importada. Novos: ${created} | Atualizados: ${updated} | Inválidos: ${invalid}`,
+        { created, updated, invalid, total: lines.length, scope }
+      )
+    );
+  } catch (error) {
+    return reply.code(500).send(
+      createResponse(0, `Erro ao importar lista residencial: ${(error as Error).message}`, { error: (error as Error).message })
+    );
+  }
+};
+
+// GET /proxy/resident/geo — países disponíveis para o residencial (code + nome)
+export const residentGeoCountries = async (_req: FastifyRequest, reply: FastifyReply) => {
+  try {
+    const countries = await getResidentGeoCountries();
+    return reply.send(createResponse(1, "Países residenciais carregados.", countries));
+  } catch (error) {
+    return reply.code(500).send(
+      createResponse(0, `Erro ao buscar países do residencial: ${(error as Error).message}`, { error: (error as Error).message })
+    );
+  }
+};
+
+// POST /proxy/resident/list/create — cria uma nova lista residencial no Proxy-Seller
+export const createResidentListHandler = async (req: FastifyRequest, reply: FastifyReply) => {
+  const body = (req.body || {}) as {
+    title?: string; country?: string; region?: string; city?: string; isp?: string;
+    rotation?: number | string; ports?: number | string; whitelist?: string; ext?: string;
+  };
+
+  if (!body.title?.trim()) {
+    return reply.code(400).send(createResponse(0, "Campo 'title' é obrigatório.", []));
+  }
+  if (!body.country?.trim()) {
+    return reply.code(400).send(createResponse(0, "Campo 'country' (código do país) é obrigatório.", []));
+  }
+
+  try {
+    const created = await createResidentList({
+      title: body.title.trim(),
+      whitelist: body.whitelist || "",
+      rotation: body.rotation != null && body.rotation !== "" ? Number(body.rotation) : 0,
+      ports: body.ports != null && body.ports !== "" ? Number(body.ports) : 1,
+      ext: body.ext || "txt",
+      geo: {
+        country: body.country.trim(),
+        region: body.region || "",
+        city: body.city || "",
+        isp: body.isp || ""
+      }
+    });
+    return reply.code(201).send(createResponse(1, "Lista residencial criada com sucesso.", created));
+  } catch (error) {
+    return reply.code(500).send(
+      createResponse(0, `Erro ao criar lista residencial: ${(error as Error).message}`, { error: (error as Error).message })
+    );
+  }
+};
+
+// POST /proxy/resident/list/rename { id, title } — renomeia a lista no Proxy-Seller
+export const renameResidentListHandler = async (req: FastifyRequest, reply: FastifyReply) => {
+  const body = (req.body || {}) as { id?: number | string; title?: string };
+  if (body.id == null || body.id === "" || !body.title?.trim()) {
+    return reply.code(400).send(createResponse(0, "Campos 'id' e 'title' são obrigatórios.", []));
+  }
+  try {
+    const result = await renameResidentList(body.id, body.title.trim());
+    return reply.send(createResponse(1, "Lista renomeada com sucesso.", result));
+  } catch (error) {
+    return reply.code(500).send(
+      createResponse(0, `Erro ao renomear lista: ${(error as Error).message}`, { error: (error as Error).message })
+    );
+  }
+};
+
+// DELETE /proxy/resident/list/:id — remove a lista no Proxy-Seller
+export const deleteResidentListHandler = async (req: FastifyRequest, reply: FastifyReply) => {
+  const { id } = req.params as { id: string };
+  try {
+    await deleteResidentList(id);
+    return reply.send(createResponse(1, "Lista removida com sucesso.", []));
+  } catch (error) {
+    return reply.code(500).send(
+      createResponse(0, `Erro ao remover lista: ${(error as Error).message}`, { error: (error as Error).message })
+    );
   }
 };
 
