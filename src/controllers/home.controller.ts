@@ -3,6 +3,7 @@ import { AppDataSource } from "@Database";
 import { Bookmaker } from "@Entities";
 import { createResponse } from "@utils/resFormatter";
 import { getFormattedSurebets, getArbitragePairs } from "@utils/functions";
+import { countUpcomingEvents } from "./external-events.controller";
 
 const bookmakerRepository = AppDataSource.getRepository(Bookmaker);
 
@@ -32,10 +33,11 @@ export const homeController = {
    */
   getStats: async (_req: FastifyRequest, reply: FastifyReply) => {
     try {
-      const [prematch, crypto, bookmakers] = await Promise.all([
+      const [prematch, crypto, bookmakers, events] = await Promise.all([
         getFormattedSurebets("prematch", {}, null),
         getArbitragePairs(),
         bookmakerRepository.count({ where: { isActive: true } }),
+        countUpcomingEvents(),
       ]);
 
       // Lucros >= 10.01% quase sempre são ruído (match de odd errado), então
@@ -67,6 +69,7 @@ export const homeController = {
           bestProfit: Number(bestProfit.toFixed(2)),
           cryptoOps,
           bookmakers,
+          events: events ?? 0,
         })
       );
     } catch (error) {

@@ -287,6 +287,32 @@ async function loadGroupedItems(f: GroupFilters): Promise<GroupedEvent[]> {
 }
 
 // ---------------------------------------------------------------------------
+// Contagem para a landing: nº de eventos do catálogo /events (grupos canônicos +
+// solitários, JÁ deduplicados entre casas), apenas os PRÓXIMOS — exatamente o
+// número que a página /events mostra por padrão (aba "Próximos"). Cache curto
+// para não bater no MySQL externo a cada poll de /stats (a home revalida a cada
+// 20s, por visitante). Best-effort: se o banco externo cair, devolve o último
+// valor conhecido (ou null) sem derrubar /stats.
+// ---------------------------------------------------------------------------
+let upcomingCountCache: { value: number; at: number } | null = null;
+const UPCOMING_COUNT_TTL = 15000;
+
+export async function countUpcomingEvents(): Promise<number | null> {
+  const now = Date.now();
+  if (upcomingCountCache && now - upcomingCountCache.at < UPCOMING_COUNT_TTL) {
+    return upcomingCountCache.value;
+  }
+  try {
+    await ensureExternalDb();
+    const items = await loadGroupedItems({ upcomingOnly: true });
+    upcomingCountCache = { value: items.length, at: now };
+    return items.length;
+  } catch {
+    return upcomingCountCache?.value ?? null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Boosted (Super Placar / Super Odds). O flag é POR ODD e hoje só existe no
 // Redis (hash de mercados por casa) — ainda não é persistido em odds_current.
 // Montamos um Set de chaves boosted lendo o Redis e fazemos overlay no merge de
