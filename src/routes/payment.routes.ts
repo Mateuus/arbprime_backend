@@ -3,6 +3,7 @@ import {
   efibankWebhook,
   getProviderConfig,
   updateProviderConfig,
+  uploadProviderCert,
   registerWebhook,
   getWebhookInfo,
   listTransactions,
@@ -28,6 +29,7 @@ export default async function paymentRoutes(app: FastifyInstance) {
   app.get("/transactions", admin, listTransactions);
   app.get("/config", admin, getProviderConfig);
   app.put("/config", admin, updateProviderConfig);
+  app.post("/config/cert", admin, uploadProviderCert);
   app.post("/config/register-webhook", admin, registerWebhook);
   app.get("/config/webhook-info", admin, getWebhookInfo);
 }

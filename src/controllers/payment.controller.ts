@@ -1,3 +1,5 @@
+import fs from "fs";
+import path from "path";
 import { FastifyRequest, FastifyReply } from "fastify";
 import { AppDataSource } from "@Database";
 import { PaymentProviderConfig, PaymentTransaction, User, UserPlan } from "@Entities";
@@ -119,6 +121,62 @@ export const updateProviderConfig = async (req: FastifyRequest, reply: FastifyRe
     return reply.send(createResponse(1, 'Config atualizada.', serializeConfig(saved)));
   } catch (error) {
     return reply.code(500).send(createResponse(0, 'Erro ao salvar config.', { error: (error as Error).message }));
+  }
+};
+
+// Diretório onde os certificados .p12 são guardados (relativo ao cwd do backend).
+// A factory resolve o certPath salvo (ex.: ./certs/arquivo.p12) a partir do mesmo cwd.
+const CERTS_DIR = path.resolve(process.cwd(), 'certs');
+const MAX_CERT_BYTES = 256 * 1024; // .p12 reais têm ~3KB; teto generoso contra abuso.
+
+// Sanitiza o nome do arquivo: só basename + caracteres seguros, evitando path traversal.
+const sanitizeCertFilename = (name: string): string => {
+  const base = path.basename((name || '').trim());
+  const cleaned = base.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '');
+  return cleaned;
+};
+
+interface CertUploadBody {
+  environment?: 'sandbox' | 'production';
+  filename?: string;
+  dataBase64?: string; // conteúdo do .p12 em base64 (com ou sem prefixo data:)
+}
+
+// POST /payment/config/cert — faz upload do certificado .p12, salva em /certs e
+// grava o caminho na coluna correspondente ao ambiente (sandbox/produção).
+export const uploadProviderCert = async (req: FastifyRequest, reply: FastifyReply) => {
+  const body = (req.body || {}) as CertUploadBody;
+  try {
+    const environment = body.environment === 'production' ? 'production' : 'sandbox';
+
+    let filename = sanitizeCertFilename(body.filename || '');
+    if (!filename) return reply.code(400).send(createResponse(0, 'Nome do arquivo inválido.', []));
+    if (!/\.p12$/i.test(filename)) return reply.code(400).send(createResponse(0, 'O certificado deve ser um arquivo .p12.', []));
+
+    // Remove prefixo data URI (data:application/x-pkcs12;base64,....) se vier do front.
+    const raw = (body.dataBase64 || '').replace(/^data:[^;]*;base64,/, '').trim();
+    if (!raw) return reply.code(400).send(createResponse(0, 'Conteúdo do certificado vazio.', []));
+
+    const buffer = Buffer.from(raw, 'base64');
+    if (buffer.length === 0) return reply.code(400).send(createResponse(0, 'Conteúdo do certificado inválido (base64).', []));
+    if (buffer.length > MAX_CERT_BYTES) return reply.code(400).send(createResponse(0, 'Arquivo grande demais para um certificado .p12.', []));
+
+    fs.mkdirSync(CERTS_DIR, { recursive: true });
+    const dest = path.join(CERTS_DIR, filename);
+    fs.writeFileSync(dest, buffer);
+
+    // Caminho relativo salvo na config (compatível com a factory: ./certs/arquivo.p12).
+    const relPath = `./certs/${filename}`;
+
+    let cfg = await configRepo().findOneBy({ provider: 'efibank' });
+    if (!cfg) cfg = configRepo().create({ provider: 'efibank' });
+    if (environment === 'production') cfg.prodCertPath = relPath;
+    else cfg.sandboxCertPath = relPath;
+    const saved = await configRepo().save(cfg);
+
+    return reply.send(createResponse(1, `Certificado salvo em ${relPath}`, { certPath: relPath, config: serializeConfig(saved) }));
+  } catch (error) {
+    return reply.code(500).send(createResponse(0, `Falha ao salvar certificado: ${(error as Error).message}`, []));
   }
 };
 
