@@ -18,9 +18,14 @@ dotenv.config();
 const app = Fastify({ logger: false, routerOptions: { ignoreTrailingSlash: true } });
 const PORT_API = process.env.PORT_API ? parseInt(process.env.PORT_API) : 3000;
 
-// Lista de origens permitidas, carregadas do .env
+// Lista de origens permitidas. Domínios de produção ficam fixos aqui (o front
+// na Vercel é servido em www.arbprime.pro); localhost + envs cobrem dev/extra.
+// OBS: a origem é só scheme+host (sem barra final nem path), como o navegador
+// envia no header `Origin`.
 const allowedOrigins = [
   "http://localhost:4000",
+  "https://www.arbprime.pro",
+  "https://arbprime.pro",
   process.env.FRONTEND_PROD_URL,
   process.env.FRONTEND_DEV_URL
 ].filter(Boolean) as string[];
