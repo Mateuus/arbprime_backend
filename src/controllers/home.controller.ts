@@ -12,6 +12,19 @@ export const homeController = {
   },
 
   /**
+   * Health-check PÚBLICO e ultraleve, usado pelo frontend para medir latência
+   * e decidir o melhor servidor (failover Principal/Secundário). Sem auth, sem
+   * banco — só responde rápido. CORS liberado para qualquer origem (o front
+   * pode bater daqui de previews da Vercel); a resposta não expõe nada sensível.
+   */
+  ping: (_req: FastifyRequest, reply: FastifyReply) => {
+    return reply
+      .header("Access-Control-Allow-Origin", "*")
+      .header("Cache-Control", "no-store")
+      .send({ ok: true, server: process.env.SERVER_LABEL || null, ts: Date.now() });
+  },
+
+  /**
    * Estatísticas agregadas para a landing page (PÚBLICO).
    * Devolve APENAS números (contadores) — nunca a lista de surebets/odds,
    * que é conteúdo gated. Assim a home não precisa assinar o WebSocket nem
