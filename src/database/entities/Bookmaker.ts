@@ -45,6 +45,12 @@ export class Bookmaker {
   @Column({ type: 'varchar', nullable: true })
   cloneOf!: string | null;
 
+  // Comissão da casa em PORCENTAGEM (ex.: 6.5 = 6,5%), para casas de exchange
+  // (ex.: Betfair) onde a comissão incide sobre o lucro. Usada para pré-preencher
+  // automaticamente o campo de comissão na calculadora. Null = casa comum (0%).
+  @Column({ type: 'float', nullable: true })
+  commissionPct!: number | null;
+
   @Column({ default: true })
   isActive!: boolean;
 

@@ -40,7 +40,7 @@ export const listBookmakers = async (_req: FastifyRequest, reply: FastifyReply) 
 export const addBookmaker = async (req: FastifyRequest, reply: FastifyReply) => {
   const body = (req.body || {}) as {
     slug?: string; name?: string; logoUrl?: string; color?: string; url?: string;
-    cloneOf?: string | null; isActive?: boolean; sortOrder?: number;
+    cloneOf?: string | null; isActive?: boolean; sortOrder?: number; commissionPct?: number | null;
   };
 
   const slug = normalizeSlug(body.slug || "");
@@ -61,6 +61,7 @@ export const addBookmaker = async (req: FastifyRequest, reply: FastifyReply) => 
       color: body.color || null,
       url: body.url || null,
       cloneOf: body.cloneOf || null,
+      commissionPct: body.commissionPct ?? null,
       isActive: body.isActive ?? true,
       // Ordem automática: vai para o fim da lista (maior + 1).
       sortOrder: await nextSortOrder()
@@ -106,7 +107,7 @@ export const updateBookmaker = async (req: FastifyRequest, reply: FastifyReply) 
       }
     }
 
-    const allowed = ["name", "logoUrl", "color", "url", "cloneOf", "isActive"];
+    const allowed = ["name", "logoUrl", "color", "url", "cloneOf", "commissionPct", "isActive"];
     for (const key of allowed) {
       if (key in body) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any

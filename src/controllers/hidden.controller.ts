@@ -16,6 +16,16 @@ export const listHidden = async (req: FastifyRequest, reply: FastifyReply) => {
   const userId = req.userData?.userId;
   if (!userId) return reply.code(401).send(createResponse(0, "Não autenticado.", []));
   try {
+    // Auto-remove os ocultos cujo evento já começou — não faz sentido manter
+    // ocultado um evento que já aconteceu (excluímos direto, não só escondemos).
+    await repo()
+      .createQueryBuilder()
+      .delete()
+      .where("userId = :userId", { userId })
+      .andWhere("eventStartAt IS NOT NULL")
+      .andWhere("eventStartAt <= :now", { now: new Date() })
+      .execute();
+
     const rows = await repo().find({ where: { userId }, order: { createdAt: 'DESC' } });
     return reply.send(createResponse(1, "Ocultos carregados.", rows));
   } catch (error) {
@@ -27,12 +37,15 @@ export const listHidden = async (req: FastifyRequest, reply: FastifyReply) => {
 export const addHidden = async (req: FastifyRequest, reply: FastifyReply) => {
   const userId = req.userData?.userId;
   if (!userId) return reply.code(401).send(createResponse(0, "Não autenticado.", []));
-  const b = (req.body || {}) as { type?: string; itemKey?: string; label?: string };
+  const b = (req.body || {}) as { type?: string; itemKey?: string; label?: string; eventStartAt?: string };
 
   if (!b.type || !TYPES.includes(b.type)) return reply.code(400).send(createResponse(0, "type inválido.", []));
   if (!b.itemKey || !b.itemKey.trim()) return reply.code(400).send(createResponse(0, "itemKey é obrigatório.", []));
 
   const itemKey = b.itemKey.trim().slice(0, 255);
+  // Início do evento (ISO) p/ auto-remover quando o jogo começar. Ignora data inválida.
+  const parsedStart = b.eventStartAt ? new Date(b.eventStartAt) : null;
+  const eventStartAt = parsedStart && !Number.isNaN(parsedStart.getTime()) ? parsedStart : null;
   try {
     let row = await repo().findOneBy({ userId, type: b.type as UserHiddenItem['type'], itemKey });
     if (!row) {
@@ -42,7 +55,12 @@ export const addHidden = async (req: FastifyRequest, reply: FastifyReply) => {
         type: b.type as UserHiddenItem['type'],
         itemKey,
         label: b.label ? String(b.label).slice(0, 200) : null,
+        eventStartAt,
       });
+      row = await repo().save(row);
+    } else if (eventStartAt && !row.eventStartAt) {
+      // Backfill: item antigo (ocultado antes) ganha a data do evento agora.
+      row.eventStartAt = eventStartAt;
       row = await repo().save(row);
     }
     return reply.code(201).send(createResponse(1, "Item ocultado.", row));

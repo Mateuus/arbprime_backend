@@ -34,6 +34,11 @@ export class UserHiddenItem {
     @Column({ type: 'varchar', length: 200, nullable: true })
     label!: string | null; // p/ exibir numa tela "ocultos"
 
+    // Início do evento associado (quando há). Usado para AUTO-REMOVER o item assim
+    // que o jogo começa: não faz sentido manter ocultado um evento que já aconteceu.
+    @Column({ type: 'timestamp', nullable: true })
+    eventStartAt!: Date | null;
+
     @Column({ type: 'timestamp', default: () => 'CURRENT_TIMESTAMP' })
     createdAt!: Date;
 }
