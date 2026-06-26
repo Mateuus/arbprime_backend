@@ -23,6 +23,13 @@ const commissionRepo = () => AppDataSource.getRepository(AffiliateCommission);
 const payoutRepo = () => AppDataSource.getRepository(AffiliatePayout);
 const userRepo = () => AppDataSource.getRepository(User);
 
+// commissionValue: % => [0,100]; fixed (R$) => >= 0. (a comissão real ainda é
+// limitada ao valor pago em computeCommissionCents.)
+const clampCommissionValue = (type: 'percent' | 'fixed', raw: unknown): number => {
+  const v = Math.max(0, Number(raw) || 0);
+  return type === 'percent' ? Math.min(100, v) : v;
+};
+
 const addDays = (base: Date, days: number): Date => {
   const d = new Date(base.getTime());
   d.setDate(d.getDate() + days);
@@ -94,7 +101,7 @@ export const activateAffiliate = async (userId: string, adminId: string, opts: A
     code,
     isActive: true,
     commissionType: opts.commissionType === 'fixed' ? 'fixed' : 'percent',
-    commissionValue: Math.max(0, Number(opts.commissionValue) || 0),
+    commissionValue: clampCommissionValue(opts.commissionType === 'fixed' ? 'fixed' : 'percent', opts.commissionValue),
     holdDays: opts.holdDays !== undefined ? Math.max(0, Math.floor(Number(opts.holdDays) || 0)) : 7,
     pixKey: opts.pixKey || null,
     notes: opts.notes || null,
@@ -133,7 +140,8 @@ export const updateAffiliate = async (id: string, patch: AffiliatePatch): Promis
   if (!affiliate) throw new Error('Afiliado não encontrado.');
   if (patch.isActive !== undefined) affiliate.isActive = !!patch.isActive;
   if (patch.commissionType && ['percent', 'fixed'].includes(patch.commissionType)) affiliate.commissionType = patch.commissionType;
-  if (patch.commissionValue !== undefined) affiliate.commissionValue = Math.max(0, Number(patch.commissionValue) || 0);
+  if (patch.commissionValue !== undefined) affiliate.commissionValue = clampCommissionValue(affiliate.commissionType, patch.commissionValue);
+  else affiliate.commissionValue = clampCommissionValue(affiliate.commissionType, affiliate.commissionValue); // re-clamp se o tipo mudou para percent
   if (patch.holdDays !== undefined) affiliate.holdDays = Math.max(0, Math.floor(Number(patch.holdDays) || 0));
   if (patch.pixKey !== undefined) affiliate.pixKey = patch.pixKey || null;
   if (patch.notes !== undefined) affiliate.notes = patch.notes || null;
@@ -280,8 +288,7 @@ export const getDashboard = async (affiliateId: string, period: 'week' | 'month'
   const affiliate = await affiliateRepo().findOne({ where: { id: affiliateId }, relations: ['user'] });
   const totalRedemptions = await redemptionRepo()
     .createQueryBuilder('r')
-    .leftJoin('r.coupon', 'coupon')
-    .where('coupon.affiliateId = :aid', { aid: affiliateId })
+    .where('r.affiliateId = :aid', { aid: affiliateId })
     .getCount();
 
   return {
@@ -303,10 +310,9 @@ export const getRedemptions = async (affiliateId: string, params: { page?: numbe
   const limit = Math.min(100, Math.max(1, params.limit || 20));
   const qb = redemptionRepo()
     .createQueryBuilder('r')
-    .leftJoin('r.coupon', 'coupon')
     .leftJoin('r.customer', 'customer')
     .addSelect(['customer.fullname', 'customer.email'])
-    .where('coupon.affiliateId = :aid', { aid: affiliateId })
+    .where('r.affiliateId = :aid', { aid: affiliateId })
     .orderBy('r.createdAt', 'DESC');
   if (params.search && params.search.trim()) qb.andWhere('r.couponCode LIKE :s', { s: `%${params.search.trim().toUpperCase()}%` });
 
@@ -384,9 +390,14 @@ export const recordPayout = async (
       .andWhere('availableAt IS NOT NULL AND availableAt <= :now', { now: new Date() })
       .execute();
 
-    const available = await manager.getRepository(AffiliateCommission).find({
-      where: { affiliateId, status: 'available' },
-    });
+    // Trava as linhas (FOR UPDATE): um segundo payout concorrente bloqueia até
+    // este commitar e, ao reler, não encontra mais nada 'available' (evita repasse duplicado).
+    const available = await manager.getRepository(AffiliateCommission)
+      .createQueryBuilder('c')
+      .setLock('pessimistic_write')
+      .where('c.affiliateId = :aid', { aid: affiliateId })
+      .andWhere("c.status = 'available'")
+      .getMany();
     if (!available.length) throw new Error('Não há comissões disponíveis para repasse.');
 
     const amountCents = available.reduce((s, c) => s + c.amountCents, 0);
@@ -426,13 +437,15 @@ export const recordCommissionForTransaction = async (tx: PaymentTransaction): Pr
   const customerId = tx.user?.id;
   const paidAt = tx.paidAt || new Date();
 
-  // 1) Registro de uso do cupom (idempotente).
+  // 1) Registro de uso do cupom (idempotente via índice único transactionId).
   const existingRedemption = await redemptionRepo().findOneBy({ transactionId: tx.id });
   if (!existingRedemption) {
     try {
       await redemptionRepo().save(redemptionRepo().create({
         couponId: tx.couponId || null,
         couponCode: tx.couponCode,
+        // affiliateId desnormalizado: o histórico do afiliado sobrevive à exclusão do cupom.
+        affiliateId: tx.affiliateId || null,
         customerId: customerId || (null as unknown as string),
         transactionId: tx.id,
         originalAmountCents: tx.originalAmountCents || tx.amountCents,
@@ -445,51 +458,71 @@ export const recordCommissionForTransaction = async (tx: PaymentTransaction): Pr
           .where('id = :id', { id: tx.couponId }).execute();
       }
     } catch (err) {
-      console.error('[affiliate.service] recordRedemption:', (err as Error).message);
+      if (!isDuplicateKey(err)) console.error('[affiliate.service] recordRedemption:', (err as Error).message);
     }
   }
 
-  // 2) Comissão do afiliado (só cupom de afiliado com comissão > 0).
-  if (!tx.affiliateId || !tx.commissionCents || tx.commissionCents <= 0) return;
+  // 2) Comissão do afiliado (só cupom de afiliado).
+  if (!tx.affiliateId) return;
 
   const existingCommission = await commissionRepo().findOneBy({ transactionId: tx.id });
   if (existingCommission) return;
 
   const affiliate = await affiliateRepo().findOneBy({ id: tx.affiliateId });
   if (!affiliate) return;
+  if (!affiliate.isActive) return; // afiliado suspenso entre checkout e pagamento → sem comissão
+
+  // Recalcula sobre o valor PAGO com a config ATUAL do afiliado, mantendo o
+  // registro internamente consistente (amount = type/value aplicados sobre base).
+  const commissionCents = computeCommissionCents(affiliate, tx.amountCents);
+  if (commissionCents <= 0) return;
 
   const availableAt = addDays(paidAt, affiliate.holdDays || 0);
   const status: AffiliateCommission['status'] = availableAt <= new Date() ? 'available' : 'pending';
 
   try {
-    await commissionRepo().save(commissionRepo().create({
-      affiliateId: affiliate.id,
-      customerId: customerId || null,
-      transactionId: tx.id,
-      couponCode: tx.couponCode,
-      baseAmountCents: tx.amountCents, // comissão sobre o valor pago
-      commissionType: affiliate.commissionType,
-      commissionValue: Number(affiliate.commissionValue) || 0,
-      amountCents: tx.commissionCents,
-      status,
-      availableAt,
-    }));
-
-    await affiliateRepo().createQueryBuilder().update(Affiliate)
-      .set({
-        totalEarningsCents: () => `totalEarningsCents + ${tx.commissionCents}`,
-        totalReferrals: () => 'totalReferrals + 1',
-        lastCommissionAt: () => 'CURRENT_TIMESTAMP',
-      })
-      .where('id = :id', { id: affiliate.id }).execute();
+    // save da comissão + atualização dos agregados na MESMA transação (não dessincroniza).
+    await AppDataSource.transaction(async (manager) => {
+      await manager.getRepository(AffiliateCommission).save(manager.getRepository(AffiliateCommission).create({
+        affiliateId: affiliate.id,
+        customerId: customerId || null,
+        transactionId: tx.id,
+        couponCode: tx.couponCode,
+        baseAmountCents: tx.amountCents, // comissão sobre o valor pago
+        commissionType: affiliate.commissionType,
+        commissionValue: Number(affiliate.commissionValue) || 0,
+        amountCents: commissionCents,
+        status,
+        availableAt,
+      }));
+      await manager.getRepository(Affiliate).createQueryBuilder().update(Affiliate)
+        .set({
+          totalEarningsCents: () => `totalEarningsCents + ${commissionCents}`,
+          totalReferrals: () => 'totalReferrals + 1',
+          lastCommissionAt: () => 'CURRENT_TIMESTAMP',
+        })
+        .where('id = :id', { id: affiliate.id }).execute();
+    });
   } catch (err) {
-    console.error('[affiliate.service] recordCommission:', (err as Error).message);
+    if (!isDuplicateKey(err)) console.error('[affiliate.service] recordCommission:', (err as Error).message);
   }
 };
 
-/** Comissão (em centavos) que um afiliado ganharia sobre um valor pago. */
+// Detecta violação de chave única do MySQL (idempotência em corrida) p/ não mascarar outros erros.
+const isDuplicateKey = (err: unknown): boolean => {
+  const e = err as { code?: string; errno?: number; driverError?: { code?: string; errno?: number } };
+  return e?.code === 'ER_DUP_ENTRY' || e?.errno === 1062 || e?.driverError?.code === 'ER_DUP_ENTRY' || e?.driverError?.errno === 1062;
+};
+
+/**
+ * Comissão (em centavos) sobre um valor pago. Regra de margem: a comissão NUNCA
+ * excede o valor efetivamente pago (vale p/ fixed e percent — evita pagar ao
+ * afiliado mais do que a plataforma recebeu, mesmo com config % > 100).
+ */
 export const computeCommissionCents = (affiliate: Pick<Affiliate, 'commissionType' | 'commissionValue'>, paidCents: number): number => {
   const value = Number(affiliate.commissionValue) || 0;
-  if (affiliate.commissionType === 'fixed') return Math.min(paidCents, Math.round(value * 100));
-  return Math.round((paidCents * value) / 100);
+  const raw = affiliate.commissionType === 'fixed'
+    ? Math.round(value * 100)
+    : Math.round((paidCents * value) / 100);
+  return Math.max(0, Math.min(paidCents, raw));
 };

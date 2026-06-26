@@ -79,13 +79,27 @@ export const validateCoupon = async (params: {
   if (coupon.validFrom && now < new Date(coupon.validFrom)) return fail('Cupom ainda não está válido.', coupon);
   if (coupon.validUntil && now > new Date(coupon.validUntil)) return fail('Cupom expirado.', coupon);
 
-  if (coupon.maxRedemptions && coupon.timesRedeemed >= coupon.maxRedemptions) {
-    return fail('Cupom esgotado.', coupon);
+  // Reserva otimista: além dos usos confirmados (timesRedeemed/redemptions), conta
+  // as cobranças ainda PENDENTES com este cupom, para que checkouts concorrentes
+  // não furem o limite na janela entre gerar o PIX e confirmar o pagamento.
+  const PENDING = ['pending', 'in_review'];
+
+  if (coupon.maxRedemptions && coupon.maxRedemptions > 0) {
+    const pending = await txRepo().createQueryBuilder('tx')
+      .where('tx.couponId = :cid', { cid: coupon.id })
+      .andWhere('tx.status IN (:...st)', { st: PENDING })
+      .getCount();
+    if (coupon.timesRedeemed + pending >= coupon.maxRedemptions) return fail('Cupom esgotado.', coupon);
   }
 
   if (coupon.maxPerUser && coupon.maxPerUser > 0) {
     const used = await redemptionRepo().count({ where: { couponId: coupon.id, customerId: params.customerId } });
-    if (used >= coupon.maxPerUser) return fail('Você já atingiu o limite de uso deste cupom.', coupon);
+    const pendingByUser = await txRepo().createQueryBuilder('tx')
+      .where('tx.couponId = :cid', { cid: coupon.id })
+      .andWhere('tx.userId = :uid', { uid: params.customerId })
+      .andWhere('tx.status IN (:...st)', { st: PENDING })
+      .getCount();
+    if (used + pendingByUser >= coupon.maxPerUser) return fail('Você já atingiu o limite de uso deste cupom.', coupon);
   }
 
   if (coupon.minAmountCents && params.baseCents < coupon.minAmountCents) {

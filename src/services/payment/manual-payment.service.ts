@@ -3,7 +3,8 @@ import { AppDataSource } from '@Database';
 import { User, Plan, PaymentTransaction, ManualPaymentConfig } from '@Entities';
 import { computeFinalPrice } from '@utils/plan';
 import { activateSubscription } from '../subscription.service';
-import { recordCommissionForTransaction } from '../affiliate.service';
+import { recordCommissionForTransaction, computeCommissionCents } from '../affiliate.service';
+import { validateCoupon } from '../coupon.service';
 
 /**
  * Fluxo de pagamento MANUAL (PIX estático com aprovação humana):
@@ -45,8 +46,8 @@ export interface ManualCheckoutResult {
   status: string;
 }
 
-/** Cria (ou reaproveita) a transação manual pendente do usuário para um plano. */
-export const createManualCheckout = async (userId: string, planId: string): Promise<ManualCheckoutResult> => {
+/** Cria (ou reaproveita) a transação manual pendente do usuário para um plano (com cupom opcional). */
+export const createManualCheckout = async (userId: string, planId: string, couponCode?: string): Promise<ManualCheckoutResult> => {
   const user = await userRepo().findOneBy({ id: userId });
   if (!user) throw new Error('Usuário não encontrado');
 
@@ -58,9 +59,29 @@ export const createManualCheckout = async (userId: string, planId: string): Prom
   const cfg = await getManualConfig();
   if (!cfg.isActive) throw new Error('Pagamento manual indisponível no momento.');
 
-  const finalPrice = computeFinalPrice(plan);
-  const amountCents = Math.round(finalPrice * 100);
-  if (amountCents <= 0) throw new Error('Valor do plano inválido');
+  const originalAmountCents = Math.round(computeFinalPrice(plan) * 100);
+  if (originalAmountCents <= 0) throw new Error('Valor do plano inválido');
+
+  // Cupom (opcional): mesma lógica do fluxo Efí, para que o desconto seja aplicado
+  // e a comissão do afiliado seja contabilizada na aprovação (recordCommissionForTransaction).
+  let amountCents = originalAmountCents;
+  let discountCents = 0;
+  let appliedCouponCode: string | null = null;
+  let couponId: string | null = null;
+  let affiliateId: string | null = null;
+  let commissionCents = 0;
+  if (couponCode && couponCode.trim()) {
+    const v = await validateCoupon({ code: couponCode, customerId: userId, baseCents: originalAmountCents });
+    if (!v.valid || !v.coupon) throw new Error(v.message || 'Cupom inválido.');
+    discountCents = v.discountCents;
+    amountCents = v.finalCents;
+    appliedCouponCode = v.coupon.code;
+    couponId = v.coupon.id;
+    if (v.coupon.affiliateId && v.coupon.affiliate && v.coupon.affiliate.isActive) {
+      affiliateId = v.coupon.affiliateId;
+      commissionCents = computeCommissionCents(v.coupon.affiliate, amountCents);
+    }
+  }
 
   // Reaproveita uma transação manual em aberto (pendente/aguardando ou em análise)
   // do mesmo usuário+plano, evitando duplicatas a cada reabertura do modal.
@@ -76,12 +97,17 @@ export const createManualCheckout = async (userId: string, planId: string): Prom
 
   let tx = open;
   if (tx) {
-    // Atualiza o snapshot do QR/copia-e-cola (config pode ter mudado) se ainda não enviou comprovante.
+    // Atualiza o snapshot (QR/valor/cupom) enquanto ainda não enviou comprovante.
     if (tx.status === 'pending') {
       tx.pixCopiaECola = cfg.pixCopiaECola;
       tx.pixQrCodeImage = cfg.qrImage;
       tx.amountCents = amountCents;
-      tx.originalAmountCents = amountCents;
+      tx.originalAmountCents = originalAmountCents;
+      tx.discountCents = discountCents;
+      tx.couponCode = appliedCouponCode;
+      tx.couponId = couponId;
+      tx.affiliateId = affiliateId;
+      tx.commissionCents = commissionCents;
       tx = await txRepo().save(tx);
     }
   } else {
@@ -93,7 +119,12 @@ export const createManualCheckout = async (userId: string, planId: string): Prom
       txid: crypto.randomUUID(),
       externalId: null,
       amountCents,
-      originalAmountCents: amountCents,
+      originalAmountCents,
+      discountCents,
+      couponCode: appliedCouponCode,
+      couponId,
+      affiliateId,
+      commissionCents,
       status: 'pending',
       pixCopiaECola: cfg.pixCopiaECola,
       pixQrCodeImage: cfg.qrImage,
@@ -214,12 +245,26 @@ export const approveManualPayment = async (txid: string, adminId: string, note?:
   if (tx.status === 'completed') return tx; // idempotência
 
   const now = new Date();
+
+  // Gate atômico: na dupla aprovação (duplo clique / dois admins), só UMA vence a
+  // transição → completed; as demais veem affected=0 e não duplicam a assinatura.
+  const gate = await txRepo()
+    .createQueryBuilder()
+    .update(PaymentTransaction)
+    .set({ status: 'completed', paidAt: now, reviewedBy: adminId, reviewedAt: now, reviewNote: note !== undefined ? (note.trim() || null) : tx.reviewNote })
+    .where('txid = :txid', { txid })
+    .andWhere("status IN ('pending', 'in_review')")
+    .execute();
+  if (!gate.affected) {
+    const fresh = await txRepo().findOne({ where: { txid }, relations: ['user', 'plan'] });
+    return fresh || tx;
+  }
   tx.status = 'completed';
   tx.paidAt = now;
   tx.reviewedBy = adminId;
   tx.reviewedAt = now;
   if (note !== undefined) tx.reviewNote = note.trim() || null;
-  const saved = await txRepo().save(tx);
+  const saved = tx;
 
   const userId = tx.user?.id;
   const plan = tx.plan;

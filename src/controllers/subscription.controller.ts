@@ -147,15 +147,18 @@ export const getPaymentMethods = async (req: FastifyRequest, reply: FastifyReply
 export const createManualCheckout = async (req: FastifyRequest, reply: FastifyReply) => {
   const userId = req.userData?.userId;
   if (!userId) return reply.code(401).send(createResponse(0, 'Não autenticado.', []));
-  const { planId } = (req.body || {}) as { planId?: string };
+  const { planId, couponCode } = (req.body || {}) as { planId?: string; couponCode?: string };
   if (!planId) return reply.code(400).send(createResponse(0, "O campo 'planId' é obrigatório.", []));
 
   try {
-    const r = await createManualCheckoutSvc(userId, planId);
+    const r = await createManualCheckoutSvc(userId, planId, couponCode);
     return reply.code(201).send(createResponse(1, 'Solicitação criada.', {
       txid: r.transaction.txid,
       status: r.status,
       amountCents: r.amountCents,
+      originalAmountCents: r.transaction.originalAmountCents,
+      discountCents: r.transaction.discountCents,
+      couponCode: r.transaction.couponCode,
       pixKey: r.pixKey,
       pixCopiaECola: r.pixCopiaECola,
       qrImage: r.qrImage,

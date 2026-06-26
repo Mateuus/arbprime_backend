@@ -179,9 +179,23 @@ export const processWebhook = async (payload: unknown): Promise<{ handled: boole
 const finalizeTransaction = async (tx: PaymentTransaction, paidAt: Date): Promise<PaymentTransaction> => {
   if (tx.status === 'completed') return tx;
 
+  // Gate atômico de idempotência: na corrida webhook×polling (comum no fluxo Efí),
+  // só UMA requisição consegue a transição pending→completed. As demais veem
+  // affected=0 e NÃO repetem activateSubscription (que empilharia o dobro do prazo).
+  const gate = await txRepo()
+    .createQueryBuilder()
+    .update(PaymentTransaction)
+    .set({ status: 'completed', paidAt })
+    .where('id = :id', { id: tx.id })
+    .andWhere("status = 'pending'")
+    .execute();
+  if (!gate.affected) {
+    const fresh = await loadTx(tx.txid);
+    return fresh || tx;
+  }
   tx.status = 'completed';
   tx.paidAt = paidAt;
-  const saved = await txRepo().save(tx);
+  const saved = tx;
 
   const userId = tx.user?.id || (await reloadUserId(tx.id));
   const planId = tx.plan?.id || (await reloadPlanId(tx.id));

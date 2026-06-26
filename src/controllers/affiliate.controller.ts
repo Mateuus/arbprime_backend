@@ -129,7 +129,12 @@ export const getAffiliatePayouts = async (req: FastifyRequest, reply: FastifyRep
     if (!affiliate) return;
     const { page = '1', limit = '20' } = (req.query || {}) as { page?: string; limit?: string };
     const data = await getPayouts(affiliate.id, { page: parseInt(page), limit: parseInt(limit) });
-    return reply.send(createResponse(1, 'Repasses carregados.', data));
+    // Remove campos internos do admin (note, createdBy) do payload do afiliado.
+    const payouts = data.payouts.map((p) => ({
+      id: p.id, amountCents: p.amountCents, commissionsCount: p.commissionsCount,
+      method: p.method, pixKey: p.pixKey, reference: p.reference, status: p.status, createdAt: p.createdAt,
+    }));
+    return reply.send(createResponse(1, 'Repasses carregados.', { ...data, payouts }));
   } catch (error) {
     return reply.code(500).send(createResponse(0, 'Erro ao carregar repasses.', { error: (error as Error).message }));
   }

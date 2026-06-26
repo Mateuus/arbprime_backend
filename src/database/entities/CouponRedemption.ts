@@ -26,6 +26,12 @@ export class CouponRedemption {
   @Column({ type: 'varchar', length: 40 })
   couponCode!: string; // snapshot do código usado
 
+  // Afiliado dono do cupom no momento do uso (desnormalizado). Sobrevive à
+  // exclusão do cupom — o histórico/atribuição do afiliado não depende do join.
+  @Index('idx_redemption_affiliate')
+  @Column({ type: 'varchar', nullable: true })
+  affiliateId!: string | null;
+
   @ManyToOne(() => User, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'customerId' })
   customer!: User;
