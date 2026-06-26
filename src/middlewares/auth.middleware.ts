@@ -3,6 +3,8 @@ import { FastifyRequest, FastifyReply } from "fastify";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 import { createResponse } from "@utils";
+import { AppDataSource } from "@Database";
+import { User } from "@Entities";
 
 // Carregar variáveis de ambiente
 dotenv.config();
@@ -46,8 +48,20 @@ export const optionalAuth = async (req: FastifyRequest) => {
 };
 
 // preHandler de autorização: exige role 'admin' (use depois de checkAuth).
+// IMPORTANTE: valida o papel DIRETO NO BANCO (fonte da verdade), não pelo JWT.
+// O token guarda o role do momento do login (validade 24h); se confiássemos nele,
+// promover/rebaixar um usuário no banco só valeria após relogar. Lendo do banco,
+// a mudança vale na hora — e um admin rebaixado perde o acesso imediatamente.
 export const checkAdmin = async (req: FastifyRequest, reply: FastifyReply) => {
-  if (!req.userData || req.userData.role !== "admin") {
-    return reply.code(403).send(createResponse(0, "Acesso restrito a administradores", []));
+  const denied = () => reply.code(403).send(createResponse(0, "Acesso restrito a administradores", []));
+  if (!req.userData?.userId) return denied();
+
+  try {
+    const user = await AppDataSource.getRepository(User).findOneBy({ id: req.userData.userId });
+    if (!user || user.role !== "admin") return denied();
+    // Mantém o role coerente com o banco para o resto do request.
+    req.userData.role = user.role;
+  } catch (error) {
+    return reply.code(500).send(createResponse(0, "Erro ao validar permissão de administrador.", { error: (error as Error).message }));
   }
 };
