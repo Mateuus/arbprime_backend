@@ -4,12 +4,16 @@ import { User, Plan, PaymentTransaction } from '@Entities';
 import { computeFinalPrice } from '@utils/plan';
 import { PaymentProviderFactory } from './payment-factory.service';
 import { activateSubscription } from '../subscription.service';
+import { validateCoupon, MIN_CHARGE_CENTS } from '../coupon.service';
+import { computeCommissionCents, recordCommissionForTransaction } from '../affiliate.service';
 import type { WebhookEvent } from './payment-provider.interface';
 
 /**
  * Orquestra o fluxo de pagamento de planos:
- *  1. createPlanCheckout → cria cobrança PIX no provider + transação `pending`.
- *  2. webhook/poll → marca `completed` e ativa a assinatura (uma vez só).
+ *  1. createPlanCheckout → cria cobrança PIX no provider + transação `pending`
+ *     (aplicando cupom de desconto, se houver, sobre o preço já promocional).
+ *  2. webhook/poll → marca `completed`, ativa a assinatura e contabiliza a
+ *     comissão do afiliado (quando o cupom é de afiliado), tudo uma vez só.
  */
 
 const userRepo = () => AppDataSource.getRepository(User);
@@ -21,11 +25,14 @@ export interface CheckoutResult {
   pixCopiaECola: string;
   pixQrCodeImage: string | null;
   amountCents: number;
+  originalAmountCents: number;
+  discountCents: number;
+  couponCode: string | null;
   expiresAt: Date | null;
 }
 
-/** Cria a cobrança PIX para um plano e persiste a transação. */
-export const createPlanCheckout = async (userId: string, planId: string): Promise<CheckoutResult> => {
+/** Cria a cobrança PIX para um plano (com cupom opcional) e persiste a transação. */
+export const createPlanCheckout = async (userId: string, planId: string, couponCode?: string): Promise<CheckoutResult> => {
   const user = await userRepo().findOneBy({ id: userId });
   if (!user) throw new Error('Usuário não encontrado');
 
@@ -34,9 +41,32 @@ export const createPlanCheckout = async (userId: string, planId: string): Promis
   if (!plan.isActive) throw new Error('Plano indisponível');
   if (plan.isTrial) throw new Error('Plano de teste não é cobrado — use a ativação de teste gratuito');
 
-  const finalPrice = computeFinalPrice(plan);
-  const amountCents = Math.round(finalPrice * 100);
-  if (amountCents <= 0) throw new Error('Valor do plano inválido');
+  const originalAmountCents = Math.round(computeFinalPrice(plan) * 100);
+  if (originalAmountCents <= 0) throw new Error('Valor do plano inválido');
+
+  // Cupom (opcional): valida e aplica o desconto sobre o preço já promocional.
+  let amountCents = originalAmountCents;
+  let discountCents = 0;
+  let appliedCouponCode: string | null = null;
+  let couponId: string | null = null;
+  let affiliateId: string | null = null;
+  let commissionCents = 0;
+
+  if (couponCode && couponCode.trim()) {
+    const v = await validateCoupon({ code: couponCode, customerId: userId, baseCents: originalAmountCents });
+    if (!v.valid || !v.coupon) throw new Error(v.message || 'Cupom inválido.');
+    discountCents = v.discountCents;
+    amountCents = v.finalCents;
+    appliedCouponCode = v.coupon.code;
+    couponId = v.coupon.id;
+    // Cupom de afiliado ativo → calcula a comissão (sobre o valor PAGO) e guarda o snapshot.
+    if (v.coupon.affiliateId && v.coupon.affiliate && v.coupon.affiliate.isActive) {
+      affiliateId = v.coupon.affiliateId;
+      commissionCents = computeCommissionCents(v.coupon.affiliate, amountCents);
+    }
+  }
+
+  if (amountCents < MIN_CHARGE_CENTS) throw new Error('Valor final inválido para cobrança.');
 
   const provider = await PaymentProviderFactory.getEfiProvider();
   const correlationId = crypto.randomUUID();
@@ -57,6 +87,12 @@ export const createPlanCheckout = async (userId: string, planId: string): Promis
     txid: charge.externalId,
     externalId: charge.externalId,
     amountCents,
+    originalAmountCents,
+    discountCents,
+    couponCode: appliedCouponCode,
+    couponId,
+    affiliateId,
+    commissionCents,
     status: 'pending',
     pixCopiaECola: charge.pixCopiaECola,
     pixQrCodeImage: charge.pixQrCodeImage || null,
@@ -70,6 +106,9 @@ export const createPlanCheckout = async (userId: string, planId: string): Promis
     pixCopiaECola: charge.pixCopiaECola,
     pixQrCodeImage: charge.pixQrCodeImage || null,
     amountCents,
+    originalAmountCents,
+    discountCents,
+    couponCode: appliedCouponCode,
     expiresAt: charge.expiresAt || null,
   };
 };
@@ -84,6 +123,8 @@ export const refreshTransactionStatus = async (
 ): Promise<PaymentTransaction> => {
   const tx = await loadTx(txid, userId);
   if (!tx) throw new Error('Transação não encontrada');
+  // Pagamento manual não tem API/poll — o status só muda na aprovação do admin.
+  if (tx.provider === 'manual_pix') return tx;
   if (tx.status !== 'pending') return tx;
 
   try {
@@ -154,6 +195,15 @@ const finalizeTransaction = async (tx: PaymentTransaction, paidAt: Date): Promis
       }
     }
   }
+
+  // Contabiliza uso do cupom e a comissão do afiliado (idempotente; nunca bloqueia o pagamento).
+  try {
+    if (!tx.user?.id && userId) tx.user = { id: userId } as User;
+    await recordCommissionForTransaction(tx);
+  } catch (err) {
+    console.error('[payment.service] recordCommissionForTransaction falhou:', (err as Error).message);
+  }
+
   return saved;
 };
 

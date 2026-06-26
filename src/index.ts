@@ -10,7 +10,7 @@ import { LogCategory, LogColor } from '@Enums';
 import EventHandler from "./schedulers/eventHandler";
 import { AppDataSource } from "./database/data-source";
 import { getWorkerPath } from "@utils/functions";
-import { seedDefaultPlans, seedPaymentConfig } from "@utils/seed";
+import { seedDefaultPlans, seedPaymentConfig, seedManualConfig } from "@utils/seed";
 import { rebuildEventExclusionCache } from "@Core/eventExclusionCache";
 
 dotenv.config();
@@ -93,8 +93,8 @@ AppDataSource.initialize()
   .then(() => {
     logger.log("📢 Inicializando serviços do sistema...", LoggerClass.LogCategory.Server, "[ROOT]", LoggerClass.LogColor.White);
     logger.log("📄 Banco de dados conectado com sucesso...", LoggerClass.LogCategory.Database, "[MYSQL]", LoggerClass.LogColor.Magenta);
-    // Semeia planos padrão e config de pagamento (idempotente).
-    Promise.all([seedDefaultPlans(), seedPaymentConfig()]).catch((e) =>
+    // Semeia planos padrão e config dos providers de pagamento (idempotente).
+    Promise.all([seedDefaultPlans(), seedPaymentConfig(), seedManualConfig()]).catch((e) =>
       logger.error(`Seed de planos/pagamento falhou: ${(e as Error).message}`, LoggerClass.LogCategory.Database, "[SEED]")
     );
     initializeServices();

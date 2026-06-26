@@ -18,6 +18,10 @@ import analytixRoutes from "./analytix.routes";
 import communityRoutes from "./community.routes";
 import valuebetConfigRoutes from "./valuebet-config.routes";
 import valuebetClvRoutes from "./valuebet-clv.routes";
+import affiliateRoutes from "./affiliate.routes";
+import couponsRoutes from "./coupons.routes";
+import adminAffiliateRoutes from "./adminAffiliate.routes";
+import adminCouponsRoutes from "./adminCoupons.routes";
 
 export default async function routes(app: FastifyInstance) {
   app.register(homeRoutes);
@@ -39,4 +43,8 @@ export default async function routes(app: FastifyInstance) {
   app.register(communityRoutes, { prefix: "/community" });
   app.register(valuebetConfigRoutes, { prefix: "/valuebet/config" });
   app.register(valuebetClvRoutes, { prefix: "/valuebet/clv" });
+  app.register(affiliateRoutes, { prefix: "/affiliate" });
+  app.register(couponsRoutes, { prefix: "/coupons" });
+  app.register(adminAffiliateRoutes, { prefix: "/admin/affiliates" });
+  app.register(adminCouponsRoutes, { prefix: "/admin/coupons" });
 }

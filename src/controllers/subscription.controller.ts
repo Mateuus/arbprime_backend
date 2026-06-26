@@ -1,6 +1,6 @@
 import { FastifyRequest, FastifyReply } from "fastify";
 import { AppDataSource } from "@Database";
-import { User, Plan, UserPlan } from "@Entities";
+import { User, Plan, UserPlan, PaymentProviderConfig } from "@Entities";
 import { createResponse, serializePlan } from "@utils";
 import {
   resolveUserAccess,
@@ -9,6 +9,11 @@ import {
   activateSubscription,
 } from "@Services/subscription.service";
 import { createPlanCheckout, refreshTransactionStatus } from "@Services/payment/payment.service";
+import {
+  getManualConfig,
+  createManualCheckout as createManualCheckoutSvc,
+  submitManualProof as submitManualProofSvc,
+} from "@Services/payment/manual-payment.service";
 
 /**
  * Assinatura do usuário logado: status, checkout (PIX), polling e teste grátis.
@@ -55,15 +60,18 @@ export const getMySubscription = async (req: FastifyRequest, reply: FastifyReply
 export const createCheckout = async (req: FastifyRequest, reply: FastifyReply) => {
   const userId = req.userData?.userId;
   if (!userId) return reply.code(401).send(createResponse(0, 'Não autenticado.', []));
-  const { planId } = (req.body || {}) as { planId?: string };
+  const { planId, couponCode } = (req.body || {}) as { planId?: string; couponCode?: string };
   if (!planId) return reply.code(400).send(createResponse(0, "O campo 'planId' é obrigatório.", []));
 
   try {
-    const result = await createPlanCheckout(userId, planId);
+    const result = await createPlanCheckout(userId, planId, couponCode);
     return reply.code(201).send(createResponse(1, 'Cobrança criada.', {
       txid: result.transaction.txid,
       status: result.transaction.status,
       amountCents: result.amountCents,
+      originalAmountCents: result.originalAmountCents,
+      discountCents: result.discountCents,
+      couponCode: result.couponCode,
       pixCopiaECola: result.pixCopiaECola,
       pixQrCodeImage: result.pixQrCodeImage,
       expiresAt: result.expiresAt,
@@ -110,5 +118,69 @@ export const activateTrial = async (req: FastifyRequest, reply: FastifyReply) =>
     return reply.code(201).send(createResponse(1, `Teste de ${trialPlan.durationInDays} dias ativado!`, serializeUserPlan({ ...up, plan: trialPlan })));
   } catch (error) {
     return reply.code(500).send(createResponse(0, (error as Error).message || 'Erro ao ativar teste.', []));
+  }
+};
+
+// ===================== PAGAMENTO MANUAL (usuário) =====================
+
+// GET /subscription/payment-methods — métodos disponíveis no checkout (Efí / manual).
+export const getPaymentMethods = async (req: FastifyRequest, reply: FastifyReply) => {
+  if (!req.userData?.userId) return reply.code(401).send(createResponse(0, 'Não autenticado.', []));
+  try {
+    const efi = await AppDataSource.getRepository(PaymentProviderConfig).findOneBy({ provider: 'efibank' });
+    const manual = await getManualConfig();
+    return reply.send(createResponse(1, 'Métodos carregados.', {
+      efibank: { active: !!efi?.isActive },
+      manual: {
+        active: !!manual.isActive,
+        displayName: manual.displayName,
+        hasQr: !!manual.qrImage,
+        hasCopyPaste: !!manual.pixCopiaECola,
+      },
+    }));
+  } catch (error) {
+    return reply.code(500).send(createResponse(0, 'Erro ao carregar métodos.', { error: (error as Error).message }));
+  }
+};
+
+// POST /subscription/checkout/manual { planId } — cria a solicitação de pagamento manual.
+export const createManualCheckout = async (req: FastifyRequest, reply: FastifyReply) => {
+  const userId = req.userData?.userId;
+  if (!userId) return reply.code(401).send(createResponse(0, 'Não autenticado.', []));
+  const { planId } = (req.body || {}) as { planId?: string };
+  if (!planId) return reply.code(400).send(createResponse(0, "O campo 'planId' é obrigatório.", []));
+
+  try {
+    const r = await createManualCheckoutSvc(userId, planId);
+    return reply.code(201).send(createResponse(1, 'Solicitação criada.', {
+      txid: r.transaction.txid,
+      status: r.status,
+      amountCents: r.amountCents,
+      pixKey: r.pixKey,
+      pixCopiaECola: r.pixCopiaECola,
+      qrImage: r.qrImage,
+      instructions: r.instructions,
+      displayName: r.displayName,
+      proofUploadedAt: r.transaction.proofUploadedAt,
+      reviewNote: r.transaction.reviewNote,
+    }));
+  } catch (error) {
+    return reply.code(400).send(createResponse(0, (error as Error).message || 'Erro ao criar solicitação.', []));
+  }
+};
+
+// POST /subscription/checkout/manual/:txid/proof { dataBase64, mime } — anexa o comprovante.
+export const submitManualProof = async (req: FastifyRequest, reply: FastifyReply) => {
+  const userId = req.userData?.userId;
+  if (!userId) return reply.code(401).send(createResponse(0, 'Não autenticado.', []));
+  const { txid } = req.params as { txid: string };
+  const { dataBase64, mime } = (req.body || {}) as { dataBase64?: string; mime?: string };
+  if (!dataBase64 || !mime) return reply.code(400).send(createResponse(0, 'Comprovante e tipo são obrigatórios.', []));
+
+  try {
+    const tx = await submitManualProofSvc(userId, txid, { dataBase64, mime });
+    return reply.send(createResponse(1, 'Comprovante enviado! Aguarde a confirmação.', { txid: tx.txid, status: tx.status }));
+  } catch (error) {
+    return reply.code(400).send(createResponse(0, (error as Error).message || 'Erro ao enviar comprovante.', []));
   }
 };

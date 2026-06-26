@@ -6,6 +6,7 @@ import { createResponse } from "@utils/resFormatter";
 import { User, ABFilter } from "@Entities";
 import { UserResponseDTO } from "@Interfaces";
 import { resolveUserAccess } from "@Services/subscription.service";
+import { isUserAffiliate } from "@Services/affiliate.service";
 
 const userRepository = AppDataSource.getRepository(User);
 const abFilterRepository = AppDataSource.getRepository(ABFilter);
@@ -193,7 +194,8 @@ export const getUserInfo = async (req: FastifyRequest, reply: FastifyReply) => {
           console.error('[getUserInfo] resolveUserAccess falhou:', (e as Error).message);
         }
         const { password, ...userWithoutPassword } = user;
-        return reply.code(200).send(createResponse(1, translations.accountRecoveredSuccessfully, { user: userWithoutPassword }));
+        const isAffiliate = await isUserAffiliate(user.id).catch(() => false);
+        return reply.code(200).send(createResponse(1, translations.accountRecoveredSuccessfully, { user: { ...userWithoutPassword, isAffiliate } }));
       } else {
         return reply.code(409).send(createResponse(0, translations.accountDoesNotExist, []));
       }

@@ -8,6 +8,14 @@ import {
   getWebhookInfo,
   listTransactions,
   getDashboard,
+  getManualConfig,
+  updateManualConfig,
+  uploadManualQr,
+  deleteManualQr,
+  listManualReviewQueue,
+  getManualProofImage,
+  approveManual,
+  rejectManual,
 } from "@Controllers";
 import { checkAuth, checkAdmin } from "../middlewares/auth.middleware";
 
@@ -32,4 +40,15 @@ export default async function paymentRoutes(app: FastifyInstance) {
   app.post("/config/cert", admin, uploadProviderCert);
   app.post("/config/register-webhook", admin, registerWebhook);
   app.get("/config/webhook-info", admin, getWebhookInfo);
+
+  // Provider manual (admin): config + fila de aprovações.
+  const adminUpload = { preHandler: [checkAuth, checkAdmin], bodyLimit: 4 * 1024 * 1024 };
+  app.get("/manual/config", admin, getManualConfig);
+  app.put("/manual/config", admin, updateManualConfig);
+  app.post("/manual/config/qr", adminUpload, uploadManualQr);
+  app.delete("/manual/config/qr", admin, deleteManualQr);
+  app.get("/manual/review", admin, listManualReviewQueue);
+  app.get("/manual/review/:txid/proof", admin, getManualProofImage);
+  app.post("/manual/review/:txid/approve", admin, approveManual);
+  app.post("/manual/review/:txid/reject", admin, rejectManual);
 }

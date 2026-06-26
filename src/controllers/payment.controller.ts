@@ -2,10 +2,17 @@ import fs from "fs";
 import path from "path";
 import { FastifyRequest, FastifyReply } from "fastify";
 import { AppDataSource } from "@Database";
-import { PaymentProviderConfig, PaymentTransaction, User, UserPlan } from "@Entities";
+import { PaymentProviderConfig, PaymentTransaction, User, UserPlan, ManualPaymentConfig } from "@Entities";
 import { createResponse } from "@utils";
 import { processWebhook } from "@Services/payment/payment.service";
 import { PaymentProviderFactory } from "@Services/payment/payment-factory.service";
+import {
+  getManualConfig as getManualConfigSvc,
+  listManualReview,
+  getManualProof as getManualProofSvc,
+  approveManualPayment,
+  rejectManualPayment,
+} from "@Services/payment/manual-payment.service";
 
 /**
  * Webhook do provider (público) + administração de pagamentos (admin):
@@ -302,5 +309,139 @@ export const getDashboard = async (_req: FastifyRequest, reply: FastifyReply) =>
     }));
   } catch (error) {
     return reply.code(500).send(createResponse(0, 'Erro ao carregar dashboard.', { error: (error as Error).message }));
+  }
+};
+
+// ===================== PROVIDER MANUAL (admin) =====================
+
+const manualRepo = () => AppDataSource.getRepository(ManualPaymentConfig);
+
+const serializeManualConfig = (c: ManualPaymentConfig) => ({
+  id: c.id,
+  provider: c.provider,
+  isActive: c.isActive,
+  displayName: c.displayName,
+  pixKey: c.pixKey,
+  pixCopiaECola: c.pixCopiaECola,
+  hasQr: !!c.qrImage,
+  qrImage: c.qrImage, // o admin precisa ver/baixar o QR atual
+  instructions: c.instructions,
+  updatedAt: c.updatedAt,
+});
+
+// GET /payment/manual/config — config do provider manual.
+export const getManualConfig = async (_req: FastifyRequest, reply: FastifyReply) => {
+  try {
+    const cfg = await getManualConfigSvc();
+    return reply.send(createResponse(1, 'Config manual carregada.', serializeManualConfig(cfg)));
+  } catch (error) {
+    return reply.code(500).send(createResponse(0, 'Erro ao carregar config manual.', { error: (error as Error).message }));
+  }
+};
+
+interface ManualConfigBody {
+  isActive?: boolean;
+  displayName?: string;
+  pixKey?: string;
+  pixCopiaECola?: string;
+  instructions?: string;
+}
+
+// PUT /payment/manual/config — atualiza a config do provider manual.
+export const updateManualConfig = async (req: FastifyRequest, reply: FastifyReply) => {
+  const body = (req.body || {}) as ManualConfigBody;
+  try {
+    const cfg = await getManualConfigSvc();
+    if (body.isActive !== undefined) cfg.isActive = !!body.isActive;
+    if (body.displayName !== undefined) cfg.displayName = body.displayName.trim() || 'PIX Manual';
+    if (body.pixKey !== undefined) cfg.pixKey = body.pixKey.trim() || null;
+    if (body.pixCopiaECola !== undefined) cfg.pixCopiaECola = body.pixCopiaECola.trim() || null;
+    if (body.instructions !== undefined) cfg.instructions = body.instructions.trim() || null;
+    const saved = await manualRepo().save(cfg);
+    return reply.send(createResponse(1, 'Config manual atualizada.', serializeManualConfig(saved)));
+  } catch (error) {
+    return reply.code(500).send(createResponse(0, 'Erro ao salvar config manual.', { error: (error as Error).message }));
+  }
+};
+
+// POST /payment/manual/config/qr { dataBase64, mime } — sobe a imagem do QR.
+export const uploadManualQr = async (req: FastifyRequest, reply: FastifyReply) => {
+  const { dataBase64, mime } = (req.body || {}) as { dataBase64?: string; mime?: string };
+  try {
+    const m = (mime || '').toLowerCase();
+    if (!/^image\/(png|jpe?g|webp|gif)$/.test(m)) return reply.code(400).send(createResponse(0, 'Envie uma imagem (PNG/JPG/WEBP).', []));
+    const raw = (dataBase64 || '').replace(/^data:[^;]*;base64,/, '').trim();
+    if (!raw) return reply.code(400).send(createResponse(0, 'Imagem do QR vazia.', []));
+    const buffer = Buffer.from(raw, 'base64');
+    if (buffer.length === 0) return reply.code(400).send(createResponse(0, 'Imagem inválida (base64).', []));
+    if (buffer.length > 2 * 1024 * 1024) return reply.code(400).send(createResponse(0, 'Imagem grande demais (máx. 2MB).', []));
+
+    const cfg = await getManualConfigSvc();
+    cfg.qrImage = `data:${m};base64,${raw}`;
+    const saved = await manualRepo().save(cfg);
+    return reply.send(createResponse(1, 'QR atualizado.', serializeManualConfig(saved)));
+  } catch (error) {
+    return reply.code(500).send(createResponse(0, `Falha ao salvar QR: ${(error as Error).message}`, []));
+  }
+};
+
+// DELETE /payment/manual/config/qr — remove a imagem do QR.
+export const deleteManualQr = async (_req: FastifyRequest, reply: FastifyReply) => {
+  try {
+    const cfg = await getManualConfigSvc();
+    cfg.qrImage = null;
+    const saved = await manualRepo().save(cfg);
+    return reply.send(createResponse(1, 'QR removido.', serializeManualConfig(saved)));
+  } catch (error) {
+    return reply.code(500).send(createResponse(0, 'Erro ao remover QR.', { error: (error as Error).message }));
+  }
+};
+
+// GET /payment/manual/review?status=&page=&limit= — fila de aprovações manuais.
+export const listManualReviewQueue = async (req: FastifyRequest, reply: FastifyReply) => {
+  const { status, page = '1', limit = '20' } = (req.query || {}) as { status?: string; page?: string; limit?: string };
+  try {
+    const data = await listManualReview({ status, page: parseInt(page) || 1, limit: parseInt(limit) || 20 });
+    return reply.send(createResponse(1, 'Fila carregada.', data));
+  } catch (error) {
+    return reply.code(500).send(createResponse(0, 'Erro ao carregar fila.', { error: (error as Error).message }));
+  }
+};
+
+// GET /payment/manual/review/:txid/proof — comprovante (data URI) para visualização.
+export const getManualProofImage = async (req: FastifyRequest, reply: FastifyReply) => {
+  const { txid } = req.params as { txid: string };
+  try {
+    const proof = await getManualProofSvc(txid);
+    return reply.send(createResponse(1, 'Comprovante carregado.', proof));
+  } catch (error) {
+    return reply.code(404).send(createResponse(0, (error as Error).message || 'Comprovante não encontrado.', []));
+  }
+};
+
+// POST /payment/manual/review/:txid/approve { note? } — aprova e ativa a assinatura.
+export const approveManual = async (req: FastifyRequest, reply: FastifyReply) => {
+  const adminId = req.userData?.userId || 'admin';
+  const { txid } = req.params as { txid: string };
+  const { note } = (req.body || {}) as { note?: string };
+  try {
+    const tx = await approveManualPayment(txid, adminId, note);
+    return reply.send(createResponse(1, 'Pagamento aprovado e assinatura ativada.', { txid: tx.txid, status: tx.status }));
+  } catch (error) {
+    return reply.code(400).send(createResponse(0, (error as Error).message || 'Erro ao aprovar.', []));
+  }
+};
+
+// POST /payment/manual/review/:txid/reject { note } — recusa (com motivo).
+export const rejectManual = async (req: FastifyRequest, reply: FastifyReply) => {
+  const adminId = req.userData?.userId || 'admin';
+  const { txid } = req.params as { txid: string };
+  const { note } = (req.body || {}) as { note?: string };
+  if (!note || !note.trim()) return reply.code(400).send(createResponse(0, 'Informe o motivo da recusa.', []));
+  try {
+    const tx = await rejectManualPayment(txid, adminId, note);
+    return reply.send(createResponse(1, 'Pagamento recusado.', { txid: tx.txid, status: tx.status }));
+  } catch (error) {
+    return reply.code(400).send(createResponse(0, (error as Error).message || 'Erro ao recusar.', []));
   }
 };
