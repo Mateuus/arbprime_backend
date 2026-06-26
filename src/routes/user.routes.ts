@@ -1,10 +1,9 @@
 import { FastifyInstance } from "fastify";
-import { registerUser, lookupCPF, loginUser, logoutAccount, getUserInfo, getUserAuth, changePassword, getUserFilters, getFilterById, createFilter, updateFilter, deleteFilter } from "@Controllers";
+import { registerUser, loginUser, logoutAccount, getUserInfo, getUserAuth, changePassword, getUserFilters, getFilterById, createFilter, updateFilter, deleteFilter } from "@Controllers";
 import { checkAuth } from "../middlewares/auth.middleware";
 
 export default async function userRoutes(app: FastifyInstance) {
   app.post("/register", registerUser);
-  app.post("/lookup", lookupCPF);
   app.post("/login", loginUser);
   app.post("/logout", { preHandler: checkAuth }, logoutAccount);
   app.get("/info", { preHandler: checkAuth }, getUserInfo);

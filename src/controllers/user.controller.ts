@@ -1,6 +1,5 @@
 import { FastifyRequest, FastifyReply } from "fastify";
 import bcrypt from 'bcryptjs';
-import axios from 'axios';
 import jwt from 'jsonwebtoken';
 import { AppDataSource } from '@Database';
 import { createResponse } from "@utils/resFormatter";
@@ -11,19 +10,8 @@ import { resolveUserAccess } from "@Services/subscription.service";
 const userRepository = AppDataSource.getRepository(User);
 const abFilterRepository = AppDataSource.getRepository(ABFilter);
 
-export const lookupCPF = async (req: FastifyRequest, reply: FastifyReply) => {
-  const translations = req.translations;
-  const { personal_id } = req.body as { personal_id?: string };
-
-  try {
-    const response = await axios.post('https://kyc.betao.bet.br/v1/client/personal-id/lookup', {
-      personal_id,
-    });
-    return reply.code(200).send(createResponse(0, 'Dados', response.data));
-  } catch (error) {
-    return reply.code(500).send(createResponse(0, translations.internalServerError, { error: error }));
-  }
-};
+// (Removido) lookupCPF: a verificação de CPF por API externa (KYC betao) foi
+// desativada — o usuário preenche o nome manualmente no cadastro.
 
 export const registerUser = async (req: FastifyRequest, reply: FastifyReply) => {
     const translations = req.translations;
