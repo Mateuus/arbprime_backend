@@ -7,25 +7,31 @@ import { Entity, PrimaryGeneratedColumn, Column, Index } from 'typeorm';
  * eventos no matching/cálculo.
  *
  * `scope`:
- *  - 'house' = remover UMA casa específica do evento (bookmaker + houseEventId).
- *  - 'event' = remover o EVENTO inteiro (todas as casas), por groupId (= SurebetData.id).
+ *  - 'house'  = remover UMA casa específica do evento, TODOS os mercados (bookmaker + houseEventId).
+ *  - 'market' = remover UM mercado específico de UMA casa no evento (bookmaker + houseEventId + market canônico).
+ *  - 'event'  = remover o EVENTO inteiro (todas as casas), por groupId (= SurebetData.id).
  */
 @Entity('event_exclusions')
 @Index('idx_exclusion_house', ['bookmaker', 'houseEventId'])
+@Index('idx_exclusion_market', ['bookmaker', 'houseEventId', 'market'])
 @Index('idx_exclusion_group', ['groupId'])
 export class EventExclusion {
     @PrimaryGeneratedColumn('uuid')
     id!: string;
 
     @Column({ type: 'varchar', length: 16 })
-    scope!: 'house' | 'event';
+    scope!: 'house' | 'event' | 'market';
 
-    // scope = 'house'
+    // scope = 'house' | 'market'
     @Column({ type: 'varchar', length: 40, nullable: true })
     bookmaker!: string | null;
 
     @Column({ type: 'varchar', length: 64, nullable: true })
     houseEventId!: string | null;
+
+    // scope = 'market' — mercado canônico `{id}:{subId}` (SurebetOdd.market).
+    @Column({ type: 'varchar', length: 64, nullable: true })
+    market!: string | null;
 
     // scope = 'event'
     @Column({ type: 'varchar', length: 64, nullable: true })
@@ -37,6 +43,11 @@ export class EventExclusion {
 
     @Column({ type: 'varchar', length: 255, nullable: true })
     reason!: string | null;
+
+    // Início do evento (kickoff). Usado para sumir da lista de exclusões quando o
+    // evento já acabou (kickoff + buffer). null = desconhecido (sempre exibe).
+    @Column({ type: 'timestamp', nullable: true })
+    eventStartAt!: Date | null;
 
     @Column({ type: 'varchar', length: 64, nullable: true })
     createdBy!: string | null; // userId do admin

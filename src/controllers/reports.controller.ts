@@ -11,6 +11,17 @@ const repo = () => AppDataSource.getRepository(SurebetReport);
 
 const VALID_REASONS = ['different_teams', 'event_not_found', 'wrong_markets', 'different_odds', 'closed_market', 'other'];
 
+// Janela após o kickoff em que ainda consideramos o evento "rolando"; passado
+// isso, o evento já acabou e some da fila admin. Override por env.
+const FINISHED_AFTER_MS = Number(process.env.EVENT_FINISHED_AFTER_MS) || 3 * 60 * 60 * 1000;
+
+// Date a partir de string ISO do client (mesma lógica do hidden controller).
+const parseStart = (v?: string | null): Date | null => {
+  if (!v) return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
 interface ReportBody {
   reason?: string;
   scope?: 'event' | 'leg';
@@ -19,6 +30,7 @@ interface ReportBody {
   league?: string;
   home?: string;
   away?: string;
+  eventStartAt?: string;
   bookmaker?: string;
   houseEventId?: string;
   market?: string;
@@ -39,24 +51,33 @@ export const createReport = async (req: FastifyRequest, reply: FastifyReply) => 
   }
   if (!b.eventId) return reply.code(400).send(createResponse(0, "O campo 'eventId' é obrigatório.", []));
 
+  // Trunca strings ao tamanho da respectiva coluna p/ evitar ER_DATA_TOO_LONG
+  // (os valores vêm direto do client; surebetKey/nomes longos passam dos limites).
+  const cut = (v: unknown, max: number): string | null => {
+    if (v == null) return null;
+    const s = String(v);
+    return s ? s.slice(0, max) : null;
+  };
+
   try {
     const report = repo().create({
       user: userId ? ({ id: userId } as User) : null,
       reason: b.reason,
       scope: b.scope === 'leg' ? 'leg' : 'event',
-      eventId: String(b.eventId),
-      sport: b.sport || 'futebol',
-      league: b.league || null,
-      home: b.home || null,
-      away: b.away || null,
-      bookmaker: b.bookmaker ? b.bookmaker.toLowerCase() : null,
-      houseEventId: b.houseEventId || null,
-      market: b.market || null,
-      selection: b.selection || null,
-      handicap: b.handicap != null ? String(b.handicap) : null,
+      eventId: String(b.eventId).slice(0, 64),
+      sport: cut(b.sport, 32) || 'futebol',
+      league: cut(b.league, 200),
+      home: cut(b.home, 200),
+      away: cut(b.away, 200),
+      eventStartAt: parseStart(b.eventStartAt),
+      bookmaker: b.bookmaker ? b.bookmaker.toLowerCase().slice(0, 40) : null,
+      houseEventId: cut(b.houseEventId, 64),
+      market: cut(b.market, 120),
+      selection: cut(b.selection, 120),
+      handicap: cut(b.handicap, 32),
       price: b.price != null ? Number(b.price) : null,
-      surebetKey: b.surebetKey || null,
-      note: b.note ? String(b.note).slice(0, 1000) : null,
+      surebetKey: cut(b.surebetKey, 512),
+      note: cut(b.note, 1000),
       status: 'open',
     });
     const saved = await repo().save(report);
@@ -89,6 +110,7 @@ const serialize = (r: SurebetReport & { user?: User | null }) => ({
   league: r.league,
   home: r.home,
   away: r.away,
+  eventStartAt: r.eventStartAt,
   bookmaker: r.bookmaker,
   houseEventId: r.houseEventId,
   market: r.market,
@@ -110,17 +132,23 @@ export const listReports = async (req: FastifyRequest, reply: FastifyReply) => {
   const p = Math.max(1, parseInt(page) || 1);
   const l = Math.min(100, Math.max(1, parseInt(limit) || 30));
 
+  // Eventos que já acabaram (kickoff + buffer) saem da fila. eventStartAt nulo
+  // (reclamações antigas, sem snapshot do kickoff) continua aparecendo.
+  const cutoff = new Date(Date.now() - FINISHED_AFTER_MS);
+  const notFinished = '(r.eventStartAt IS NULL OR r.eventStartAt >= :cutoff)';
+
   try {
     const qb = repo().createQueryBuilder('r')
       .leftJoin('r.user', 'user')
       .addSelect(['user.id', 'user.fullname', 'user.email'])
+      .where(notFinished, { cutoff })
       .orderBy('r.createdAt', 'DESC'); // coluna simples (sort de prioridade é feito pelas abas de status)
     if (status) qb.andWhere('r.status = :status', { status });
     if (reason) qb.andWhere('r.reason = :reason', { reason });
 
     const [rows, total] = await qb.skip((p - 1) * l).take(l).getManyAndCount();
-    // Contadores por status (para badges).
-    const counts = await repo().createQueryBuilder('r').select('r.status', 'status').addSelect('COUNT(*)', 'count').groupBy('r.status').getRawMany<{ status: string; count: string }>();
+    // Contadores por status (para badges) — mesma janela de "não acabou".
+    const counts = await repo().createQueryBuilder('r').select('r.status', 'status').addSelect('COUNT(*)', 'count').where(notFinished, { cutoff }).groupBy('r.status').getRawMany<{ status: string; count: string }>();
     const countMap: Record<string, number> = {};
     for (const c of counts) countMap[c.status] = Number(c.count);
 

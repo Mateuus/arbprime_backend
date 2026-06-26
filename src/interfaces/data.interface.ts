@@ -56,6 +56,9 @@ export interface SurebetOdd {
     price: number;
     bookmaker: string;
     eventId: string;
+    market: string;        // mercado canônico `{id}:{subId}`
+    rawMarket?: string;    // nome do mercado como a casa mostra (exibição)
+    handicap?: number | string | null;
     historyPrice: { timestamp: number; price: number }[];
     otherOdds: { eventId: string; bookmaker: string; price: number }[];
 }

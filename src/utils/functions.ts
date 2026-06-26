@@ -248,16 +248,20 @@ export async function getFormattedSurebets(type: string, options?: Record<string
         return data;
       });
   
-      // Aplica exclusões GLOBAIS (admin): remove evento inteiro (group) ou
-      // descarta surebets que usem uma casa excluída (house). Efeito imediato,
-      // antes mesmo do robô recalcular.
-      const { houses, groups } = await getExclusionSets();
-      const filtered = (houses.size === 0 && groups.size === 0)
+      // Aplica exclusões GLOBAIS (admin): remove evento inteiro (group), descarta
+      // surebets que usem uma casa excluída (house = todos os mercados) ou um
+      // mercado específico de uma casa (market). Efeito imediato, antes mesmo do
+      // robô recalcular.
+      const { houses, markets, groups } = await getExclusionSets();
+      const filtered = (houses.size === 0 && markets.size === 0 && groups.size === 0)
         ? parsed
         : parsed.reduce<SurebetData[]>((acc, ev) => {
             if (groups.has(ev.id)) return acc; // evento inteiro excluído
             const keep = ev.surebets.filter(
-              (sb) => !sb.surebet.some((leg) => houses.has(`${(leg.bookmaker || '').toLowerCase()}:${leg.eventId}`))
+              (sb) => !sb.surebet.some((leg) => {
+                const house = `${(leg.bookmaker || '').toLowerCase()}:${leg.eventId}`;
+                return houses.has(house) || markets.has(`${house}:${leg.market}`);
+              })
             );
             if (keep.length === 0) return acc; // sobrou nada -> remove o evento
             ev.surebets = keep;
@@ -301,15 +305,16 @@ export async function getFormattedValuebets(_type?: string, _options?: Record<st
         return data;
       });
 
-      // Exclusões GLOBAIS (admin): mesmo cache das surebets.
-      const { houses, groups } = await getExclusionSets();
-      const filtered = (houses.size === 0 && groups.size === 0)
+      // Exclusões GLOBAIS (admin): mesmo cache das surebets (house/market/event).
+      const { houses, markets, groups } = await getExclusionSets();
+      const filtered = (houses.size === 0 && markets.size === 0 && groups.size === 0)
         ? parsed
         : parsed.reduce<ValuebetGroup[]>((acc, ev) => {
             if (groups.has(ev.id)) return acc; // evento inteiro excluído
-            const keep = ev.valuebets.filter(
-              (vb) => !houses.has(`${(vb.bookmaker || '').toLowerCase()}:${vb.eventId}`)
-            );
+            const keep = ev.valuebets.filter((vb) => {
+              const house = `${(vb.bookmaker || '').toLowerCase()}:${vb.eventId}`;
+              return !houses.has(house) && !markets.has(`${house}:${vb.market}`);
+            });
             if (keep.length === 0) return acc; // sobrou nada -> remove o evento
             ev.valuebets = keep;
             ev.bestEdge = keep[0]?.edgePct || 0;

@@ -45,6 +45,11 @@ export class SurebetReport {
     @Column({ type: 'varchar', length: 200, nullable: true })
     away!: string | null;
 
+    // Início do evento (kickoff). Usado para tirar da fila admin as reclamações de
+    // eventos que já acabaram (kickoff + buffer). null = desconhecido (sempre exibe).
+    @Column({ type: 'timestamp', nullable: true })
+    eventStartAt!: Date | null;
+
     // ---- Perna/casa reclamada (scope = 'leg') ----
     @Column({ type: 'varchar', length: 40, nullable: true })
     bookmaker!: string | null;
@@ -64,8 +69,8 @@ export class SurebetReport {
     @Column({ type: 'decimal', precision: 12, scale: 3, nullable: true })
     price!: number | null;
 
-    @Column({ type: 'varchar', length: 200, nullable: true })
-    surebetKey!: string | null;
+    @Column({ type: 'varchar', length: 512, nullable: true })
+    surebetKey!: string | null; // chave composta event::markets::legs — pode passar de 200 chars em surebets de várias pernas
 
     @Column({ type: 'text', nullable: true })
     note!: string | null; // texto livre (reason = 'other')
