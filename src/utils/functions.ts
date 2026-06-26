@@ -2,7 +2,8 @@ import path from 'path';
 import fs from 'fs';
 import dotenv from "dotenv";
 import { getRedisClient } from '@Core/redis';
-import { MonitorOptions, SurebetData, UserData } from '@Interfaces';
+import { getExclusionSets } from '@Core/eventExclusionCache';
+import { MonitorOptions, SurebetData, UserData, ValuebetGroup } from '@Interfaces';
 import stringSimilarity from "string-similarity";
 import levenshtein from "fast-levenshtein";
 dotenv.config();
@@ -10,6 +11,7 @@ dotenv.config();
 const ARB_FOLDER_BASE_RKEY = process.env.ARB_FOLDER_BASE_RKEY || 'ArbBetting';
 const ARB_LIST_PREMATCH_HASH_RKEY = process.env.ARB_LIST_PREMATCH_HASH_RKEY || 'ArbitrageListPrematch';
 const ARB_LIST_LIVE_HASH_RKEY = process.env.ARB_LIST_LIVE_HASH_RKEY || 'ArbitrageListLive';
+const VALUEBET_LIST_PREMATCH_HASH_RKEY = process.env.VALUEBET_LIST_PREMATCH_HASH_RKEY || 'ValuebetListPrematch';
 const TEAM_ALIAS_HASH = "ArbPrime:Configs:TeamAliases";
 
 const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || "0.85"); // Padrão: 85%
@@ -246,12 +248,80 @@ export async function getFormattedSurebets(type: string, options?: Record<string
         return data;
       });
   
+      // Aplica exclusões GLOBAIS (admin): remove evento inteiro (group) ou
+      // descarta surebets que usem uma casa excluída (house). Efeito imediato,
+      // antes mesmo do robô recalcular.
+      const { houses, groups } = await getExclusionSets();
+      const filtered = (houses.size === 0 && groups.size === 0)
+        ? parsed
+        : parsed.reduce<SurebetData[]>((acc, ev) => {
+            if (groups.has(ev.id)) return acc; // evento inteiro excluído
+            const keep = ev.surebets.filter(
+              (sb) => !sb.surebet.some((leg) => houses.has(`${(leg.bookmaker || '').toLowerCase()}:${leg.eventId}`))
+            );
+            if (keep.length === 0) return acc; // sobrou nada -> remove o evento
+            ev.surebets = keep;
+            ev.bestProfit = keep[0]?.profitMargin || 0;
+            acc.push(ev);
+            return acc;
+          }, []);
+
       // Ordena os eventos com base no melhor profitMargin
-      parsed.sort((a, b) => (b.bestProfit || 0) - (a.bestProfit || 0));
+      filtered.sort((a, b) => (b.bestProfit || 0) - (a.bestProfit || 0));
   
-      return parsed;
+      return filtered;
     } catch (error) {
       console.error('Erro ao processar surebets:', error);
+      return [];
+    }
+}
+
+/**
+ * Lê os value bets VIVOS do Redis (HASH `ArbBetting:ValuebetListPrematch`,
+ * campo = groupId, valor = ValuebetGroup). Espelha getFormattedSurebets:
+ *  - parseia cada grupo e ordena os value bets por edgePct DESC;
+ *  - reaproveita as exclusões GLOBAIS (admin): remove evento inteiro (group) ou
+ *    descarta value bets que usem uma casa excluída (house: `bookmaker:eventId`);
+ *  - ordena os grupos pelo melhor edgePct.
+ * O arbbetting_master só emite value bet em betano/bet365/superbet (pinnacle = ref)
+ * e já entrega o grupo pré-jogo (GMT-3) — não recomputamos expiração aqui.
+ */
+export async function getFormattedValuebets(_type?: string, _options?: Record<string, unknown>, _user?: UserData | null): Promise<ValuebetGroup[]> {
+    try {
+      const redisClient = getRedisClient();
+      const raw = await redisClient.hgetall(`${ARB_FOLDER_BASE_RKEY}:${VALUEBET_LIST_PREMATCH_HASH_RKEY}`);
+      const entries = Object.entries(raw);
+
+      const parsed: ValuebetGroup[] = entries.map(([, json]) => {
+        const data = JSON.parse(json as string) as ValuebetGroup;
+        const list = Array.isArray(data.valuebets) ? data.valuebets : [];
+        list.sort((a, b) => (b.edgePct || 0) - (a.edgePct || 0));
+        data.valuebets = list;
+        data.bestEdge = list[0]?.edgePct || 0;
+        return data;
+      });
+
+      // Exclusões GLOBAIS (admin): mesmo cache das surebets.
+      const { houses, groups } = await getExclusionSets();
+      const filtered = (houses.size === 0 && groups.size === 0)
+        ? parsed
+        : parsed.reduce<ValuebetGroup[]>((acc, ev) => {
+            if (groups.has(ev.id)) return acc; // evento inteiro excluído
+            const keep = ev.valuebets.filter(
+              (vb) => !houses.has(`${(vb.bookmaker || '').toLowerCase()}:${vb.eventId}`)
+            );
+            if (keep.length === 0) return acc; // sobrou nada -> remove o evento
+            ev.valuebets = keep;
+            ev.bestEdge = keep[0]?.edgePct || 0;
+            acc.push(ev);
+            return acc;
+          }, []);
+
+      filtered.sort((a, b) => (b.bestEdge || 0) - (a.bestEdge || 0));
+
+      return filtered;
+    } catch (error) {
+      console.error('Erro ao processar value bets:', error);
       return [];
     }
 }

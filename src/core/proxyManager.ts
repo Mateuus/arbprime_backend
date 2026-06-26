@@ -1,7 +1,7 @@
 import { getRedisClient } from "@Core/redis";
 import { logger, LoggerClass } from "@Core/logger";
-import { AppDataSource } from "@Database";
-import { Proxy } from "@Entities";
+import { ExternalWriteDataSource, ensureExternalWriteDb } from "../database/external-write-data-source";
+import { Proxy } from "../database/external/proxy.entity";
 
 const ARBPRIME_FOLDER_BASE_RKEY = process.env.ARBPRIME_FOLDER_BASE_RKEY || "ArbPrime";
 const PROXY_REDIS_KEY = `${ARBPRIME_FOLDER_BASE_RKEY}:Configs:ProxyList`;
@@ -13,7 +13,8 @@ const PROXY_REDIS_KEY = `${ARBPRIME_FOLDER_BASE_RKEY}:Configs:ProxyList`;
  */
 export async function syncProxiesToRedis(): Promise<void> {
   try {
-    const repo = AppDataSource.getRepository(Proxy);
+    await ensureExternalWriteDb();
+    const repo = ExternalWriteDataSource.getRepository(Proxy);
     const proxies = await repo.find();
     const redis = getRedisClient();
 

@@ -198,12 +198,15 @@ async function loadGroupedItems(f: GroupFilters): Promise<GroupedEvent[]> {
         .orWhere("g.country LIKE :s", { s });
     }));
   }
-  if (f.upcomingOnly) gqb.andWhere("g.eventDate >= NOW()");
-  if (f.pastOnly) gqb.andWhere("g.eventDate < NOW()");
+  // Pré-filtro GROSSO e à prova de fuso (margem de 1 dia cobre qualquer offset de
+  // timezone): serve só pra limitar linhas. O filtro PRECISO de próximos/encerrados
+  // é feito em JS no fim da função (ver nota), pra bater com o horário exibido.
+  if (f.upcomingOnly) gqb.andWhere("g.eventDate >= DATE_SUB(NOW(), INTERVAL 1 DAY)");
+  if (f.pastOnly) gqb.andWhere("g.eventDate < DATE_ADD(NOW(), INTERVAL 1 DAY)");
   if (f.dateFrom) gqb.andWhere("g.eventDate >= :dateFrom", { dateFrom: f.dateFrom });
   if (f.dateTo) gqb.andWhere("g.eventDate <= :dateTo", { dateTo: f.dateTo });
 
-  const groups = await gqb.orderBy("g.eventDate", "ASC").take(ROW_CAP).getMany();
+  const groups = await gqb.orderBy("g.eventDate", f.pastOnly ? "DESC" : "ASC").take(ROW_CAP).getMany();
 
   // Membros de todos os grupos carregados (1 query só).
   const membersByGroup = new Map<string, EventGroupMember[]>();
@@ -247,12 +250,12 @@ async function loadGroupedItems(f: GroupFilters): Promise<GroupedEvent[]> {
         .orWhere("e.leagueName LIKE :s", { s });
     }));
   }
-  if (f.upcomingOnly) sqb.andWhere("e.eventDate >= NOW()");
-  if (f.pastOnly) sqb.andWhere("e.eventDate < NOW()");
+  if (f.upcomingOnly) sqb.andWhere("e.eventDate >= DATE_SUB(NOW(), INTERVAL 1 DAY)");
+  if (f.pastOnly) sqb.andWhere("e.eventDate < DATE_ADD(NOW(), INTERVAL 1 DAY)");
   if (f.dateFrom) sqb.andWhere("e.eventDate >= :dateFrom", { dateFrom: f.dateFrom });
   if (f.dateTo) sqb.andWhere("e.eventDate <= :dateTo", { dateTo: f.dateTo });
 
-  const solos = await sqb.orderBy("e.eventDate", "ASC").take(ROW_CAP).getMany();
+  const solos = await sqb.orderBy("e.eventDate", f.pastOnly ? "DESC" : "ASC").take(ROW_CAP).getMany();
 
   const soloItems: GroupedEvent[] = solos.map((e): GroupedEvent => ({
     key: `s:${e.bookmaker}:${e.eventId}`,
@@ -265,7 +268,22 @@ async function loadGroupedItems(f: GroupFilters): Promise<GroupedEvent[]> {
     houses: [{ bookmaker: e.bookmaker, eventId: e.eventId, home: e.home, away: e.away, inverted: false, link: e.link }]
   }));
 
-  return groupItems.concat(soloItems);
+  // Filtro PRECISO de próximos/encerrados em JS — NÃO em SQL. O arbbetting grava
+  // event_date em horário LOCAL (naive); o MySQL roda em UTC, então
+  // `event_date >= NOW()` errava pelo offset do fuso (um jogo das 17:00 fica salvo
+  // como "14:00" e era comparado com NOW() em UTC → caía em "Encerrados"). Aqui
+  // comparamos o MESMO Date que a UI exibe (o driver converte igual na leitura e
+  // na serialização), então o filtro e o horário mostrado SEMPRE batem.
+  let items = groupItems.concat(soloItems);
+  if (f.upcomingOnly || f.pastOnly) {
+    const now = Date.now();
+    items = items.filter((it) => {
+      if (!it.eventDate) return false;
+      const t = new Date(it.eventDate).getTime();
+      return f.upcomingOnly ? t >= now : t < now;
+    });
+  }
+  return items;
 }
 
 // ---------------------------------------------------------------------------

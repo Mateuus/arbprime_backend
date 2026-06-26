@@ -8,22 +8,24 @@ import {
 } from 'typeorm';
 
 /**
- * Proxy persistido no banco. Cobre proxies vindos do provedor Proxy-Seller
- * (provider = 'proxy-seller') e proxies cadastrados manualmente (provider = 'manual').
- * O conjunto é espelhado no Redis (ArbPrime:Configs:ProxyList) pelo proxyManager.
+ * Espelho da tabela `proxies` — cujo schema agora é DONO do arbbetting_master
+ * (lá fica a entity canônica e o synchronize). O ArbPrime apenas CURA esta tabela
+ * (tela /admin/proxies) via ExternalWriteDataSource e espelha no Redis
+ * (`ArbPrime:Configs:ProxyList`), de onde os coletores leem.
+ *
+ * Fica fora de `entities/` (que a AppDataSource principal varre por glob) para
+ * não ser recriada/sincronizada no banco do arbprime. Colunas em camelCase para
+ * casar exatamente com a tabela existente — NÃO renomear.
  */
 @Entity('proxies')
-// Unicidade por (provider, externalId) — permite vários providers sem colidir o id externo.
 @Index('IDX_proxy_provider_external', ['provider', 'externalId'], { unique: true })
 export class Proxy {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
-  // Provedor de origem: 'manual', 'proxy-seller' e outros no futuro (extensível).
   @Column({ default: 'manual' })
   provider!: string;
 
-  // id do proxy no provider externo (usado para upsert na sincronização). Null para manuais.
   @Column({ type: 'varchar', nullable: true })
   externalId!: string | null;
 
@@ -67,10 +69,8 @@ export class Proxy {
   isEnabled!: boolean;
 
   /**
-   * Escopo de uso: lista de slugs de casas (Bookmaker.slug) às quais este proxy
-   * fica restrito. Vazio/null = pool global (qualquer casa pode usar). Espelhado
-   * no Redis para o robô (arbbetting_master) filtrar o proxy por casa — usado, por
-   * ex., para reservar os residenciais (caros, por banda) só para a bet365.
+   * Escopo de uso: slugs de casas (Bookmaker.slug) às quais o proxy fica restrito.
+   * Vazio/null = pool global. Espelhado no Redis p/ o robô filtrar por casa.
    */
   @Column('simple-array', { nullable: true })
   scope!: string[] | null;

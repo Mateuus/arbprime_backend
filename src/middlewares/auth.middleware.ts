@@ -29,6 +29,22 @@ export const checkAuth = async (req: FastifyRequest, reply: FastifyReply) => {
   }
 };
 
+// preHandler de auth OPCIONAL: se houver cookie válido, popula req.userData;
+// se não houver (ou for inválido), segue como anônimo. NUNCA rejeita.
+// Usado em rotas públicas que personalizam o retorno para quem está logado.
+export const optionalAuth = async (req: FastifyRequest) => {
+  const token = req.cookies["MToken"];
+  if (!token) return;
+  try {
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) return;
+    const decodedToken = jwt.verify(token, jwtSecret) as { id: string; email: string; role: string };
+    req.userData = { userId: decodedToken.id, email: decodedToken.email, role: decodedToken.role, token: token };
+  } catch {
+    /* anônimo */
+  }
+};
+
 // preHandler de autorização: exige role 'admin' (use depois de checkAuth).
 export const checkAdmin = async (req: FastifyRequest, reply: FastifyReply) => {
   if (!req.userData || req.userData.role !== "admin") {

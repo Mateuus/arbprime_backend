@@ -6,6 +6,7 @@ import { AppDataSource } from '@Database';
 import { createResponse } from "@utils/resFormatter";
 import { User, ABFilter } from "@Entities";
 import { UserResponseDTO } from "@Interfaces";
+import { resolveUserAccess } from "@Services/subscription.service";
 
 const userRepository = AppDataSource.getRepository(User);
 const abFilterRepository = AppDataSource.getRepository(ABFilter);
@@ -106,6 +107,14 @@ export const loginUser = async (req: FastifyRequest, reply: FastifyReply) => {
         expiresIn: '24h',
       });
 
+      // Reavalia o acesso no login: expira planos vencidos e sincroniza o nível.
+      try {
+        const access = await resolveUserAccess(user.id);
+        user.level = access.level;
+      } catch (e) {
+        console.error('[login] resolveUserAccess falhou:', (e as Error).message);
+      }
+
       const userResponse: UserResponseDTO = {
         id: user.id,
         fullname: user.fullname,
@@ -188,6 +197,13 @@ export const getUserInfo = async (req: FastifyRequest, reply: FastifyReply) => {
       const user = await userRepository.findOneBy({ email: email as string });
 
       if (user) {
+        // Verifica expiração da assinatura a cada request de info e sincroniza o nível.
+        try {
+          const access = await resolveUserAccess(user.id);
+          user.level = access.level;
+        } catch (e) {
+          console.error('[getUserInfo] resolveUserAccess falhou:', (e as Error).message);
+        }
         const { password, ...userWithoutPassword } = user;
         return reply.code(200).send(createResponse(1, translations.accountRecoveredSuccessfully, { user: userWithoutPassword }));
       } else {

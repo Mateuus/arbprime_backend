@@ -8,6 +8,7 @@ import { EventGroup } from "./external/event-group.entity";
 import { EventGroupMember } from "./external/event-group-member.entity";
 import { League } from "./external/league.entity";
 import { LeagueAlias } from "./external/league-alias.entity";
+import { ValuebetEmission } from "./external/valuebet-emission.entity";
 
 /**
  * DataSource SECUNDÁRIA, somente-leitura, apontando para o MySQL do
@@ -37,7 +38,7 @@ export const ExternalDataSource = new DataSource({
   database: databaseName,
   synchronize: false,
   logging: false,
-  entities: [OddsEvent, OddsCurrent, OddsHistory, EventGroup, EventGroupMember, League, LeagueAlias],
+  entities: [OddsEvent, OddsCurrent, OddsHistory, EventGroup, EventGroupMember, League, LeagueAlias, ValuebetEmission],
   subscribers: [],
   migrations: []
 });

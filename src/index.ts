@@ -10,6 +10,8 @@ import { LogCategory, LogColor } from '@Enums';
 import EventHandler from "./schedulers/eventHandler";
 import { AppDataSource } from "./database/data-source";
 import { getWorkerPath } from "@utils/functions";
+import { seedDefaultPlans, seedPaymentConfig } from "@utils/seed";
+import { rebuildEventExclusionCache } from "@Core/eventExclusionCache";
 
 dotenv.config();
 
@@ -60,6 +62,14 @@ async function initializeServices() {
             throw new Error("Instância do Redis não está conectada.");
         }
 
+        // Reconstrói o cache de exclusões de eventos (Redis) a partir do banco.
+        try {
+            const n = await rebuildEventExclusionCache();
+            logger.log(`🚫 Cache de exclusões reconstruído (${n}).`, LoggerClass.LogCategory.Database, "[EXCL]", LoggerClass.LogColor.White);
+        } catch (e) {
+            logger.error(`Falha ao reconstruir exclusões: ${(e as Error).message}`, LoggerClass.LogCategory.Database, "[EXCL]");
+        }
+
         // ✅ Iniciar o servidor Fastify
         logger.log("📄 Iniciando o servidor Fastify...", LoggerClass.LogCategory.Server, "[ROOT]", LoggerClass.LogColor.White);
         await startServer();
@@ -83,6 +93,10 @@ AppDataSource.initialize()
   .then(() => {
     logger.log("📢 Inicializando serviços do sistema...", LoggerClass.LogCategory.Server, "[ROOT]", LoggerClass.LogColor.White);
     logger.log("📄 Banco de dados conectado com sucesso...", LoggerClass.LogCategory.Database, "[MYSQL]", LoggerClass.LogColor.Magenta);
+    // Semeia planos padrão e config de pagamento (idempotente).
+    Promise.all([seedDefaultPlans(), seedPaymentConfig()]).catch((e) =>
+      logger.error(`Seed de planos/pagamento falhou: ${(e as Error).message}`, LoggerClass.LogCategory.Database, "[SEED]")
+    );
     initializeServices();
   })
   .catch((error) => {

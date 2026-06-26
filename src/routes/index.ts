@@ -7,6 +7,17 @@ import bookmakerRoutes from "./bookmaker.routes";
 import teamsRoutes from "./teams.routes";
 import leaguesRoutes from "./leagues.routes";
 import marketsRoutes from "./markets.routes";
+import plansRoutes from "./plans.routes";
+import subscriptionRoutes from "./subscription.routes";
+import paymentRoutes from "./payment.routes";
+import adminUsersRoutes from "./adminUsers.routes";
+import reportsRoutes from "./reports.routes";
+import exclusionsRoutes from "./exclusions.routes";
+import hiddenRoutes from "./hidden.routes";
+import analytixRoutes from "./analytix.routes";
+import communityRoutes from "./community.routes";
+import valuebetConfigRoutes from "./valuebet-config.routes";
+import valuebetClvRoutes from "./valuebet-clv.routes";
 
 export default async function routes(app: FastifyInstance) {
   app.register(homeRoutes);
@@ -17,4 +28,15 @@ export default async function routes(app: FastifyInstance) {
   app.register(teamsRoutes, { prefix: "/teams" });
   app.register(leaguesRoutes, { prefix: "/leagues" });
   app.register(marketsRoutes, { prefix: "/markets" });
+  app.register(plansRoutes, { prefix: "/plans" });
+  app.register(subscriptionRoutes, { prefix: "/subscription" });
+  app.register(paymentRoutes, { prefix: "/payment" });
+  app.register(adminUsersRoutes, { prefix: "/admin/users" });
+  app.register(reportsRoutes, { prefix: "/reports" });
+  app.register(exclusionsRoutes, { prefix: "/exclusions" });
+  app.register(hiddenRoutes, { prefix: "/hidden" });
+  app.register(analytixRoutes, { prefix: "/analytix" });
+  app.register(communityRoutes, { prefix: "/community" });
+  app.register(valuebetConfigRoutes, { prefix: "/valuebet/config" });
+  app.register(valuebetClvRoutes, { prefix: "/valuebet/clv" });
 }

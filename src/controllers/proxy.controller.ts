@@ -3,8 +3,8 @@ import { DeepPartial } from "typeorm";
 import axios from "axios";
 import { SocksProxyAgent } from "socks-proxy-agent";
 import { HttpsProxyAgent } from "https-proxy-agent";
-import { AppDataSource } from "@Database";
-import { Proxy } from "@Entities";
+import { ExternalWriteDataSource, ensureExternalWriteDb } from "../database/external-write-data-source";
+import { Proxy } from "../database/external/proxy.entity";
 import { createResponse } from "@utils/resFormatter";
 import {
   fetchProxySellerList, ProxySellerType, ProxySellerProxy,
@@ -13,7 +13,19 @@ import {
 } from "@Services/proxyseller.service";
 import { syncProxiesToRedis } from "@Core/proxyManager";
 
-const proxyRepository = AppDataSource.getRepository(Proxy);
+// A tabela `proxies` é do arbbetting_master; aqui só curamos via ExternalWriteDataSource.
+const proxyRepo = () => ExternalWriteDataSource.getRepository(Proxy);
+
+// Garante o banco de curadoria (arbbetting) antes de qualquer query; 503 se indisponível.
+async function withWriteDb(reply: FastifyReply): Promise<boolean> {
+  try {
+    await ensureExternalWriteDb();
+    return true;
+  } catch (error) {
+    reply.code(503).send(createResponse(0, `Banco de proxies (arbbetting) indisponível: ${(error as Error).message}`, []));
+    return false;
+  }
+}
 
 const SELLER_TYPES: ProxySellerType[] = ["ipv4", "ipv6", "mobile", "isp", "mix", "resident"];
 
@@ -101,8 +113,9 @@ const PROVIDERS: Record<string, (type: string) => Promise<DeepPartial<Proxy>[]>>
 
 // GET /proxy — lista todos os proxies persistidos
 export const listProxies = async (req: FastifyRequest, reply: FastifyReply) => {
+  if (!(await withWriteDb(reply))) return;
   try {
-    const proxies = await proxyRepository.find({ order: { createdAt: "DESC" } });
+    const proxies = await proxyRepo().find({ order: { createdAt: "DESC" } });
     return reply.send(createResponse(1, "Proxies carregados com sucesso.", proxies));
   } catch (error) {
     return reply.code(500).send(createResponse(0, "Erro ao listar proxies.", { error }));
@@ -111,6 +124,7 @@ export const listProxies = async (req: FastifyRequest, reply: FastifyReply) => {
 
 // POST /proxy/sync { provider, type } — puxa a lista do provider e faz upsert no banco
 export const syncProvider = async (req: FastifyRequest, reply: FastifyReply) => {
+  if (!(await withWriteDb(reply))) return;
   const { provider = "proxy-seller", type = "" } = (req.body || {}) as { provider?: string; type?: string };
 
   const fetchList = PROVIDERS[provider];
@@ -129,13 +143,13 @@ export const syncProvider = async (req: FastifyRequest, reply: FastifyReply) => 
     for (const mapped of list) {
       if (!mapped.ip) continue;
 
-      const existing = await proxyRepository.findOneBy({ provider, externalId: mapped.externalId as string });
+      const existing = await proxyRepo().findOneBy({ provider, externalId: mapped.externalId as string });
       if (existing) {
-        proxyRepository.merge(existing, mapped);
-        await proxyRepository.save(existing);
+        proxyRepo().merge(existing, mapped);
+        await proxyRepo().save(existing);
         updated++;
       } else {
-        await proxyRepository.save(proxyRepository.create(mapped));
+        await proxyRepo().save(proxyRepo().create(mapped));
         created++;
       }
     }
@@ -160,6 +174,7 @@ export const syncProvider = async (req: FastifyRequest, reply: FastifyReply) => 
 
 // POST /proxy — adiciona um proxy manualmente
 export const addProxy = async (req: FastifyRequest, reply: FastifyReply) => {
+  if (!(await withWriteDb(reply))) return;
   const body = (req.body || {}) as {
     ip?: string; port?: number | string; protocol?: string; ipType?: string;
     login?: string; password?: string; isPrivate?: boolean; comment?: string;
@@ -171,7 +186,7 @@ export const addProxy = async (req: FastifyRequest, reply: FastifyReply) => {
   }
 
   try {
-    const proxy = proxyRepository.create({
+    const proxy = proxyRepo().create({
       provider: "manual",
       ip: String(body.ip),
       port: Number(body.port),
@@ -184,7 +199,7 @@ export const addProxy = async (req: FastifyRequest, reply: FastifyReply) => {
       scope: normalizeScope(body.scope),
       comment: body.comment || null
     });
-    await proxyRepository.save(proxy);
+    await proxyRepo().save(proxy);
     await syncProxiesToRedis();
     return reply.code(201).send(createResponse(1, "Proxy adicionado com sucesso.", proxy));
   } catch (error) {
@@ -194,6 +209,7 @@ export const addProxy = async (req: FastifyRequest, reply: FastifyReply) => {
 
 // POST /proxy/bulk { list, protocol? } — importa vários proxies (login:senha@ip:porta por linha)
 export const bulkAddProxies = async (req: FastifyRequest, reply: FastifyReply) => {
+  if (!(await withWriteDb(reply))) return;
   const body = (req.body || {}) as { list?: string; protocol?: string; scope?: string[] | string };
 
   if (!body.list || typeof body.list !== "string" || !body.list.trim()) {
@@ -221,13 +237,13 @@ export const bulkAddProxies = async (req: FastifyRequest, reply: FastifyReply) =
       const { ip, port, login, password } = parsed;
 
       // Evita duplicar por ip:porta
-      const existing = await proxyRepository.findOneBy({ ip, port });
+      const existing = await proxyRepo().findOneBy({ ip, port });
       if (existing) {
         skipped++;
         continue;
       }
 
-      const proxy = proxyRepository.create({
+      const proxy = proxyRepo().create({
         provider: "manual",
         ip,
         port,
@@ -239,7 +255,7 @@ export const bulkAddProxies = async (req: FastifyRequest, reply: FastifyReply) =
         isEnabled: true,
         scope
       });
-      await proxyRepository.save(proxy);
+      await proxyRepo().save(proxy);
       added++;
     }
 
@@ -259,11 +275,12 @@ export const bulkAddProxies = async (req: FastifyRequest, reply: FastifyReply) =
 
 // PUT /proxy/:id — edita campos do proxy
 export const updateProxy = async (req: FastifyRequest, reply: FastifyReply) => {
+  if (!(await withWriteDb(reply))) return;
   const { id } = req.params as { id: string };
   const body = (req.body || {}) as Record<string, unknown>;
 
   try {
-    const proxy = await proxyRepository.findOneBy({ id });
+    const proxy = await proxyRepo().findOneBy({ id });
     if (!proxy) {
       return reply.code(404).send(createResponse(0, "Proxy não encontrado.", []));
     }
@@ -283,7 +300,7 @@ export const updateProxy = async (req: FastifyRequest, reply: FastifyReply) => {
       proxy.scope = normalizeScope(body.scope);
     }
 
-    await proxyRepository.save(proxy);
+    await proxyRepo().save(proxy);
     await syncProxiesToRedis();
     return reply.send(createResponse(1, "Proxy atualizado com sucesso.", proxy));
   } catch (error) {
@@ -293,17 +310,18 @@ export const updateProxy = async (req: FastifyRequest, reply: FastifyReply) => {
 
 // PATCH /proxy/:id/toggle { isEnabled? } — ativa/desativa (alterna se não enviado)
 export const toggleProxy = async (req: FastifyRequest, reply: FastifyReply) => {
+  if (!(await withWriteDb(reply))) return;
   const { id } = req.params as { id: string };
   const body = (req.body || {}) as { isEnabled?: boolean };
 
   try {
-    const proxy = await proxyRepository.findOneBy({ id });
+    const proxy = await proxyRepo().findOneBy({ id });
     if (!proxy) {
       return reply.code(404).send(createResponse(0, "Proxy não encontrado.", []));
     }
 
     proxy.isEnabled = typeof body.isEnabled === "boolean" ? body.isEnabled : !proxy.isEnabled;
-    await proxyRepository.save(proxy);
+    await proxyRepo().save(proxy);
     await syncProxiesToRedis();
     return reply.send(createResponse(1, `Proxy ${proxy.isEnabled ? "ativado" : "desativado"}.`, proxy));
   } catch (error) {
@@ -360,10 +378,11 @@ async function runProxyCheck(proxy: Proxy): Promise<{
 
 // POST /proxy/:id/test — testa o proxy fazendo uma requisição real e mede a latência
 export const testProxy = async (req: FastifyRequest, reply: FastifyReply) => {
+  if (!(await withWriteDb(reply))) return;
   const { id } = req.params as { id: string };
 
   try {
-    const proxy = await proxyRepository.findOneBy({ id });
+    const proxy = await proxyRepo().findOneBy({ id });
     if (!proxy) {
       return reply.code(404).send(createResponse(0, "Proxy não encontrado.", []));
     }
@@ -409,6 +428,7 @@ function residentProto(proto?: string): "" | "https" | "socks5" {
 // POST /proxy/resident/import { listId, proto?, scope?, title? }
 // Baixa os endpoints de uma lista residencial e faz upsert no pool de proxies.
 export const importResidentList = async (req: FastifyRequest, reply: FastifyReply) => {
+  if (!(await withWriteDb(reply))) return;
   const body = (req.body || {}) as { listId?: number | string; proto?: string; scope?: string[] | string; title?: string };
 
   if (body.listId == null || body.listId === "") {
@@ -452,13 +472,13 @@ export const importResidentList = async (req: FastifyRequest, reply: FastifyRepl
         comment
       };
 
-      const existing = await proxyRepository.findOneBy({ provider: "proxy-seller", externalId });
+      const existing = await proxyRepo().findOneBy({ provider: "proxy-seller", externalId });
       if (existing) {
-        proxyRepository.merge(existing, fields);
-        await proxyRepository.save(existing);
+        proxyRepo().merge(existing, fields);
+        await proxyRepo().save(existing);
         updated++;
       } else {
-        await proxyRepository.save(proxyRepository.create({ ...fields, isEnabled: true }));
+        await proxyRepo().save(proxyRepo().create({ ...fields, isEnabled: true }));
         created++;
       }
     }
@@ -558,15 +578,16 @@ export const deleteResidentListHandler = async (req: FastifyRequest, reply: Fast
 
 // DELETE /proxy/:id — remove o proxy
 export const deleteProxy = async (req: FastifyRequest, reply: FastifyReply) => {
+  if (!(await withWriteDb(reply))) return;
   const { id } = req.params as { id: string };
 
   try {
-    const proxy = await proxyRepository.findOneBy({ id });
+    const proxy = await proxyRepo().findOneBy({ id });
     if (!proxy) {
       return reply.code(404).send(createResponse(0, "Proxy não encontrado.", []));
     }
 
-    await proxyRepository.remove(proxy);
+    await proxyRepo().remove(proxy);
     await syncProxiesToRedis();
     return reply.send(createResponse(1, "Proxy removido com sucesso.", []));
   } catch (error) {

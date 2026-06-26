@@ -38,4 +38,8 @@ export class User {
 
     @Column({ type: 'varchar', nullable: false, default: '/profile.png' })
     profile!: string;
+
+    // Quando o usuário ativou o teste gratuito (null = nunca usou). Garante 1 teste por conta.
+    @Column({ type: 'timestamp', nullable: true })
+    trialUsedAt!: Date | null;
 }

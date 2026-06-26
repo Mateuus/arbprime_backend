@@ -6,6 +6,7 @@ import { TeamAlias } from "./external/team-alias.entity";
 import { League } from "./external/league.entity";
 import { LeagueAlias } from "./external/league-alias.entity";
 import { BookmakerMarketName } from "./external/bookmaker-market-name.entity";
+import { Proxy } from "./external/proxy.entity";
 
 /**
  * DataSource SECUNDÁRIA, GRAVÁVEL, apontando para o MySQL do arbbetting_master.
@@ -40,7 +41,7 @@ export const ExternalWriteDataSource = new DataSource({
   database: databaseName,
   synchronize: false,
   logging: false,
-  entities: [Team, TeamAlias, League, LeagueAlias, BookmakerMarketName],
+  entities: [Team, TeamAlias, League, LeagueAlias, BookmakerMarketName, Proxy],
   subscribers: [],
   migrations: []
 });
