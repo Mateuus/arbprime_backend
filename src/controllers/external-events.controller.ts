@@ -72,14 +72,6 @@ const MARKET_SLUG_ORDER = [
   "total-corners-over-under",
   "total-cards-over-under"
 ];
-// Alguns workers (betano/superbet) emitem o Super Odds num subId fantasma
-// (match-winner-so:2) IDÊNTICO ao canônico (:1, definido em markets-futebol),
-// gerando um 2º card "Resultado Final (Super Odds)" duplicado no detalhe. Como
-// não há subId :2 canônico e os preços são os mesmos, colapsamos qualquer
-// match-winner-so:* no :1 (a dedup por casa abaixo descarta o preço repetido).
-const canonicalMarketId = (marketId: string): string =>
-  (marketId || "").startsWith("match-winner-so:") ? "match-winner-so:1" : marketId;
-
 const marketPriority = (marketId: string): number => {
   const slug = (marketId || "").split(":")[0];
   const i = MARKET_SLUG_ORDER.indexOf(slug);
@@ -642,11 +634,15 @@ export const getEventGroup = async (req: FastifyRequest, reply: FastifyReply) =>
     for (const house of houses) {
       const odds = await oddsRepo.find({ where: { bookmaker: house.bookmaker, eventId: house.eventId } });
       for (const o of odds) {
-        const marketId = canonicalMarketId(o.marketId);
-        let m = marketsMap.get(marketId);
+        // Super Odds duplicado/stale: só o subId canônico :1 é o mercado VIVO. A
+        // betano/superbet deixam um match-winner-so:2 desatualizado no odds_current
+        // (não existe mais no Redis), com preços diferentes do :1 e sem o flag
+        // boosted — sem ignorá-lo vira um 2º card e/ou uma odd stale sem boost.
+        if (o.marketId.startsWith("match-winner-so:") && o.marketId !== "match-winner-so:1") continue;
+        let m = marketsMap.get(o.marketId);
         if (!m) {
-          m = { marketId, marketName: o.marketName, selections: new Map() };
-          marketsMap.set(marketId, m);
+          m = { marketId: o.marketId, marketName: o.marketName, selections: new Map() };
+          marketsMap.set(o.marketId, m);
         }
         if (!m.marketName && o.marketName) m.marketName = o.marketName;
         const selKey = `${normalizeTeam(o.selection)}|${normHandicap(o.handicap)}`;
@@ -658,14 +654,7 @@ export const getEventGroup = async (req: FastifyRequest, reply: FastifyReply) =>
         const flagKey = oddKey(house.bookmaker, house.eventId, o.marketId, o.selection, o.handicap);
         const boosted = boostedKeys.has(flagKey);
         const pa = paKeys.has(flagKey);
-        // Dedup por casa na MESMA seleção: a mesma casa não deve aparecer 2x (ex.:
-        // match-winner-so:1 e :2 colapsados). Mantém o melhor preço e seus flags.
-        const dup = sel.prices.find((pp) => pp.bookmaker === house.bookmaker);
-        if (dup) {
-          if (o.price > dup.price) { dup.price = o.price; dup.boosted = boosted; dup.pa = pa; dup.eventId = house.eventId; }
-        } else {
-          sel.prices.push({ bookmaker: house.bookmaker, eventId: house.eventId, price: o.price, inverted: house.inverted, boosted, pa });
-        }
+        sel.prices.push({ bookmaker: house.bookmaker, eventId: house.eventId, price: o.price, inverted: house.inverted, boosted, pa });
       }
     }
 
