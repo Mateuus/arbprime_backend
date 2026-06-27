@@ -55,6 +55,7 @@ const normHandicap = (h: string | null | undefined): string => {
 const MARKET_SLUG_ORDER = [
   "match-winner",                 // Resultado Final (1X2) — SEMPRE primeiro
   "match-winner-so",              // Resultado Final (Super Odds) — logo abaixo do principal
+  "match-winner-lay",             // Resultado Final Lay (exchange/betbra) — junto do principal
   "double-chance",
   "draw-no-bet",
   "both-teams-to-score",
@@ -328,24 +329,25 @@ const oddKey = (bookmaker: string, eventId: string, marketId: string, selection:
   `${bookmaker}|${eventId}|${marketId}|${normSel(selection)}|${normHandicap(handicap == null ? "" : String(handicap))}`;
 
 /**
- * Lê do Redis (best-effort) os conjuntos de odds com flag por-odd das casas do
- * grupo: `boosted:true` (Super Placar/Super Odds) e `pa:true` (Pagamento
- * Antecipado — a casa paga a aposta como vencedora se o time abrir vantagem).
+ * Lê do Redis (best-effort) os metadados por-odd das casas do grupo que NÃO
+ * vêm no odds_current: `boosted:true` (Super Placar/Super Odds), `pa:true`
+ * (Pagamento Antecipado) e `size` (liquidez da exchange — ex.: betbra).
  * Estrutura: hash `ArbBetting:Markets:Futebol:{casa}:{eventId}`, em que cada
  * field é o marketId e o valor é o JSON do mercado
- * ({ odds:[{ name, price, handicap, boosted, pa }] }). Falha de Redis NÃO derruba
- * o detalhe — só volta vazio (sem badges). Uma passada só lê ambos os flags.
+ * ({ odds:[{ name, price, handicap, boosted, pa, size }] }). Falha de Redis NÃO
+ * derruba o detalhe — só volta vazio. Uma passada lê tudo.
  */
-async function loadOddFlags(houses: GroupedHouse[]): Promise<{ boosted: Set<string>; pa: Set<string> }> {
+async function loadOddFlags(houses: GroupedHouse[]): Promise<{ boosted: Set<string>; pa: Set<string>; sizes: Map<string, number> }> {
   const boosted = new Set<string>();
   const pa = new Set<string>();
-  if (!isRedisConnected()) return { boosted, pa };
+  const sizes = new Map<string, number>();
+  if (!isRedisConnected()) return { boosted, pa, sizes };
   try {
     const redis = getRedisClient();
     for (const house of houses) {
       const hash = await redis.hgetall(`ArbBetting:Markets:Futebol:${house.bookmaker}:${house.eventId}`);
       for (const [marketId, json] of Object.entries(hash)) {
-        let parsed: { odds?: Array<{ name?: string; handicap?: number | string; boosted?: boolean; pa?: boolean }> };
+        let parsed: { odds?: Array<{ name?: string; handicap?: number | string; boosted?: boolean; pa?: boolean; size?: number }> };
         try { parsed = JSON.parse(json); } catch { continue; }
         if (!Array.isArray(parsed.odds)) continue;
         for (const od of parsed.odds) {
@@ -353,13 +355,14 @@ async function loadOddFlags(houses: GroupedHouse[]): Promise<{ boosted: Set<stri
           const k = oddKey(house.bookmaker, house.eventId, marketId, od.name ?? "", od.handicap);
           if (od.boosted) boosted.add(k);
           if (od.pa) pa.add(k);
+          if (typeof od.size === "number" && Number.isFinite(od.size)) sizes.set(k, od.size);
         }
       }
     }
   } catch {
-    /* flags são best-effort: qualquer erro de Redis = sem badge, sem quebrar o detalhe */
+    /* best-effort: qualquer erro de Redis = sem metadados, sem quebrar o detalhe */
   }
-  return { boosted, pa };
+  return { boosted, pa, sizes };
 }
 
 // Tenta inicializar a conexão externa; em falha, devolve a resposta 503 já formatada.
@@ -618,7 +621,7 @@ export const getEventGroup = async (req: FastifyRequest, reply: FastifyReply) =>
     // Flags por-odd lidos do Redis (boosted = Super Placar/Super Odds; pa =
     // Pagamento Antecipado) — ainda não vêm no odds_current. Best-effort: sem
     // Redis = sem badges.
-    const { boosted: boostedKeys, pa: paKeys } = await loadOddFlags(houses);
+    const { boosted: boostedKeys, pa: paKeys, sizes: sizeMap } = await loadOddFlags(houses);
 
     // Carrega odds_current de cada casa e mescla por (marketId, seleção normalizada, handicap).
     // Obs.: a canonicalização das odds quando orientation='flipped' (swap de seleções
@@ -628,7 +631,7 @@ export const getEventGroup = async (req: FastifyRequest, reply: FastifyReply) =>
     const marketsMap = new Map<string, {
       marketId: string;
       marketName: string | null;
-      selections: Map<string, { selection: string; handicap: string; prices: Array<{ bookmaker: string; eventId: string; price: number; inverted: boolean; boosted: boolean; pa: boolean }> }>;
+      selections: Map<string, { selection: string; handicap: string; prices: Array<{ bookmaker: string; eventId: string; price: number; inverted: boolean; boosted: boolean; pa: boolean; size: number | null }> }>;
     }>();
 
     for (const house of houses) {
@@ -654,7 +657,8 @@ export const getEventGroup = async (req: FastifyRequest, reply: FastifyReply) =>
         const flagKey = oddKey(house.bookmaker, house.eventId, o.marketId, o.selection, o.handicap);
         const boosted = boostedKeys.has(flagKey);
         const pa = paKeys.has(flagKey);
-        sel.prices.push({ bookmaker: house.bookmaker, eventId: house.eventId, price: o.price, inverted: house.inverted, boosted, pa });
+        const size = sizeMap.has(flagKey) ? sizeMap.get(flagKey)! : null;
+        sel.prices.push({ bookmaker: house.bookmaker, eventId: house.eventId, price: o.price, inverted: house.inverted, boosted, pa, size });
       }
     }
 
