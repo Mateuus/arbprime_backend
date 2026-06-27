@@ -12,6 +12,9 @@ const ARB_FOLDER_BASE_RKEY = process.env.ARB_FOLDER_BASE_RKEY || 'ArbBetting';
 const ARB_LIST_PREMATCH_HASH_RKEY = process.env.ARB_LIST_PREMATCH_HASH_RKEY || 'ArbitrageListPrematch';
 const ARB_LIST_LIVE_HASH_RKEY = process.env.ARB_LIST_LIVE_HASH_RKEY || 'ArbitrageListLive';
 const VALUEBET_LIST_PREMATCH_HASH_RKEY = process.env.VALUEBET_LIST_PREMATCH_HASH_RKEY || 'ValuebetListPrematch';
+// Duplo Green (DG): feed espelhado dos surebets (mesmo shape SurebetData), gerado
+// pelo arbbetting_master. Selecionado via options.type === 'duplogreen'.
+const DG_LIST_PREMATCH_HASH_RKEY = process.env.DG_LIST_PREMATCH_HASH_RKEY || 'DuploGreenPrematch';
 const TEAM_ALIAS_HASH = "ArbPrime:Configs:TeamAliases";
 
 const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || "0.85"); // Padrão: 85%
@@ -231,7 +234,13 @@ export const getWorkerPath = (fileName: string): string => {
  */
 export async function getFormattedSurebets(type: string, options?: Record<string, unknown>, user?: UserData | null): Promise<SurebetData[]> {
     try {
-      const ARB_LIST_RKEY = type === 'live' ? ARB_LIST_LIVE_HASH_RKEY : ARB_LIST_PREMATCH_HASH_RKEY;
+      // Duplo Green reusa esta função: o type roteia a key. Mesmo shape SurebetData,
+      // mesma ordenação por profitMargin e mesmas exclusões admin a seguir.
+      const ARB_LIST_RKEY = type === 'duplogreen'
+        ? DG_LIST_PREMATCH_HASH_RKEY
+        : type === 'live'
+          ? ARB_LIST_LIVE_HASH_RKEY
+          : ARB_LIST_PREMATCH_HASH_RKEY;
       const redisClient = getRedisClient();
       const raw = await redisClient.hgetall(`${ARB_FOLDER_BASE_RKEY}:${ARB_LIST_RKEY}`);
       const entries = Object.entries(raw);
