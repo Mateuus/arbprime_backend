@@ -75,6 +75,13 @@ export class BetLeg {
   @Column({ type: 'decimal', precision: 14, scale: 2, nullable: true })
   legProfit!: string | null; // P&L da perna (calculado na liquidação)
 
+  // Seleções de uma MÚLTIPLA (acumulada). Quando a aposta é betType='multi', esta
+  // única perna carrega a odd COMBINADA (produto) + o stake da múltipla, e aqui
+  // ficam as seleções individuais só para exibição (mercado/opção/odd de cada uma).
+  // Null para apostas simples/surebet.
+  @Column({ type: 'json', nullable: true })
+  selections!: Array<{ market: string | null; rawMarket: string | null; selection: string | null; handicap: string | null; odd: number }> | null;
+
   @Column({ type: 'timestamp', nullable: true })
   settledAt!: Date | null;
 }

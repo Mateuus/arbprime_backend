@@ -2,7 +2,7 @@ import { FastifyInstance } from 'fastify';
 import {
   listBankrolls, createBankroll, updateBankroll, deleteBankroll, ensureValuebetBankrollHandler,
   listAccounts, createAccount, updateAccount, deleteAccount,
-  listBets, getBet, createBet, updateBet, settleBet, deleteBet,
+  listBets, getBet, createBet, updateBet, settleBet, deleteBet, deleteLeg,
   listAnalytixTransactions, createAnalytixTransaction, deleteAnalytixTransaction,
   listPartners, createPartner, updatePartner, deletePartner,
   getSummary, getTimeseries, getBreakdown,
@@ -36,6 +36,7 @@ export default async function analytixRoutes(app: FastifyInstance) {
   app.post('/bets', auth, createBet);
   app.put('/bets/:id', auth, updateBet);
   app.post('/bets/:id/settle', auth, settleBet);
+  app.delete('/bets/:id/legs/:legId', auth, deleteLeg);
   app.delete('/bets/:id', auth, deleteBet);
 
   // Transações

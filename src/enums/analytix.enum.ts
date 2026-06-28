@@ -8,6 +8,7 @@
 export enum BetType {
   SINGLE = 'single', // aposta avulsa (1 perna)
   ARB = 'arb',       // surebet / arbitragem (N pernas)
+  MULTI = 'multi',   // múltipla / acumulada (1 perna com odd combinada; seleções no JSON)
 }
 
 // Status da aposta (DERIVADO das pernas — ver analytix.service.deriveBetStatus).

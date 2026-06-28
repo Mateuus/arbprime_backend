@@ -335,6 +335,7 @@ export const deleteAccount = async (req: FastifyRequest, reply: FastifyReply) =>
 // ===================== APOSTAS =====================
 
 interface CreateLegBody {
+  id?: string; // só na edição: casa o status atual da perna existente
   bookmakerSlug?: string; accountId?: string; houseEventId?: string;
   market?: string; rawMarket?: string; selection?: string; handicap?: string | number | null;
   side?: string; odd?: number; stake?: number; commissionPct?: number; closingOdd?: number; isFreebet?: boolean;
@@ -345,6 +346,70 @@ interface CreateBetBody {
   eventStart?: string; surebetKey?: string;
   totalStake?: number; expectedProfitPct?: number; expectedProfit?: number;
   source?: string; tags?: string[]; notes?: string; legs?: CreateLegBody[];
+}
+
+/**
+ * Monta as pernas (entities, status PENDING) a partir do corpo.
+ * - simples/surebet: 1 perna por seleção (cada uma com seu stake).
+ * - MÚLTIPLA (betType='multi'): colapsa as N seleções numa ÚNICA perna com a odd
+ *   COMBINADA (produto das odds) + o stake da múltipla; as seleções individuais
+ *   ficam no JSON `selections` (só exibição). Assim o P&L/analytics tratam a
+ *   múltipla como uma aposta de 1 perna com odd grande — tudo-ou-nada.
+ */
+function buildBetLegs(b: CreateBetBody): { betType: BetType; totalStake: number; legs: BetLeg[] } {
+  const list = b.legs || [];
+
+  if (b.betType === BetType.MULTI && list.length >= 1) {
+    const combinedOdd = list.reduce((p, l) => p * svc.n(l.odd), 1);
+    const first = list[0];
+    const selections = list.map((l) => ({
+      market: l.market ? String(l.market).slice(0, 120) : null,
+      rawMarket: l.rawMarket ? String(l.rawMarket).slice(0, 160) : null,
+      selection: l.selection ? String(l.selection).slice(0, 160) : null,
+      handicap: l.handicap != null && l.handicap !== '' ? String(l.handicap).slice(0, 40) : null,
+      odd: svc.n(l.odd),
+    }));
+    const totalStake = svc.n(b.totalStake);
+    const leg = legRepo().create({
+      bookmakerSlug: String(first.bookmakerSlug || '').trim().toLowerCase().slice(0, 80),
+      accountId: first.accountId || null,
+      houseEventId: null,
+      market: 'Múltipla',
+      rawMarket: null,
+      selection: `${list.length} seleç${list.length === 1 ? 'ão' : 'ões'}`,
+      handicap: null,
+      side: BetSide.BACK,
+      isFreebet: !!first.isFreebet,
+      odd: String(combinedOdd),
+      stake: String(totalStake),
+      commissionPct: null,
+      closingOdd: null,
+      status: LegStatus.PENDING,
+      selections,
+    });
+    return { betType: BetType.MULTI, totalStake, legs: [leg] };
+  }
+
+  const betType = b.betType === BetType.SINGLE || list.length === 1 ? BetType.SINGLE : BetType.ARB;
+  const totalStake = svc.n(b.totalStake) || list.reduce((a, l) => a + svc.n(l.stake), 0);
+  const legs = list.map((l) => legRepo().create({
+    bookmakerSlug: String(l.bookmakerSlug).trim().toLowerCase().slice(0, 80),
+    accountId: l.accountId || null,
+    houseEventId: l.houseEventId ? String(l.houseEventId).slice(0, 120) : null,
+    market: l.market ? String(l.market).slice(0, 120) : null,
+    rawMarket: l.rawMarket ? String(l.rawMarket).slice(0, 160) : null,
+    selection: l.selection ? String(l.selection).slice(0, 160) : null,
+    handicap: l.handicap != null && l.handicap !== '' ? String(l.handicap).slice(0, 40) : null,
+    side: l.side === BetSide.LAY ? BetSide.LAY : BetSide.BACK,
+    isFreebet: !!l.isFreebet,
+    odd: String(svc.n(l.odd)),
+    stake: String(svc.n(l.stake)),
+    commissionPct: l.commissionPct != null ? String(svc.n(l.commissionPct)) : null,
+    closingOdd: l.closingOdd != null ? String(svc.n(l.closingOdd)) : null,
+    status: LegStatus.PENDING,
+    selections: null,
+  }));
+  return { betType, totalStake, legs };
 }
 
 export const createBet = async (req: FastifyRequest, reply: FastifyReply) => {
@@ -360,6 +425,10 @@ export const createBet = async (req: FastifyRequest, reply: FastifyReply) => {
     if (!(svc.n(l.odd) > 0)) return reply.code(400).send(createResponse(0, 'Cada perna precisa de uma odd válida (> 0).', []));
     if (!(svc.n(l.stake) >= 0)) return reply.code(400).send(createResponse(0, 'Cada perna precisa de um stake válido.', []));
   }
+  if (b.betType === BetType.MULTI) {
+    if (b.legs.length < 2) return reply.code(400).send(createResponse(0, 'Múltipla precisa de pelo menos 2 seleções.', []));
+    if (!(svc.n(b.totalStake) > 0)) return reply.code(400).send(createResponse(0, 'Múltipla precisa de um stake (> 0).', []));
+  }
 
   try {
     let bankrollId = b.bankrollId;
@@ -370,25 +439,7 @@ export const createBet = async (req: FastifyRequest, reply: FastifyReply) => {
       bankrollId = (await ensureDefaultBankroll(userId)).id;
     }
 
-    const betType = b.betType === BetType.SINGLE || b.legs.length === 1 ? BetType.SINGLE : BetType.ARB;
-    const totalStake = svc.n(b.totalStake) || b.legs.reduce((a, l) => a + svc.n(l.stake), 0);
-
-    const legs: BetLeg[] = b.legs.map((l) => legRepo().create({
-      bookmakerSlug: String(l.bookmakerSlug).trim().toLowerCase().slice(0, 80),
-      accountId: l.accountId || null,
-      houseEventId: l.houseEventId ? String(l.houseEventId).slice(0, 120) : null,
-      market: l.market ? String(l.market).slice(0, 120) : null,
-      rawMarket: l.rawMarket ? String(l.rawMarket).slice(0, 160) : null,
-      selection: l.selection ? String(l.selection).slice(0, 160) : null,
-      handicap: l.handicap != null && l.handicap !== '' ? String(l.handicap).slice(0, 40) : null,
-      side: l.side === BetSide.LAY ? BetSide.LAY : BetSide.BACK,
-      isFreebet: !!l.isFreebet,
-      odd: String(svc.n(l.odd)),
-      stake: String(svc.n(l.stake)),
-      commissionPct: l.commissionPct != null ? String(svc.n(l.commissionPct)) : null,
-      closingOdd: l.closingOdd != null ? String(svc.n(l.closingOdd)) : null,
-      status: LegStatus.PENDING,
-    }));
+    const { betType, totalStake, legs } = buildBetLegs(b);
 
     const bet = betRepo().create({
       userId, bankrollId, betType, status: BetStatus.OPEN,
@@ -464,14 +515,21 @@ export const getBet = async (req: FastifyRequest, reply: FastifyReply) => {
   }
 };
 
+type UpdateBetBody = Partial<{
+  tags: string[]; notes: string; hidden: boolean; home: string; away: string; sport: string; league: string;
+  eventStart: string; bankrollId: string; betType: string; totalStake: number; legs: CreateLegBody[];
+}>;
+
 export const updateBet = async (req: FastifyRequest, reply: FastifyReply) => {
   const userId = uid(req);
   if (!userId) return reply.code(401).send(createResponse(0, 'Não autenticado.', []));
   const { id } = req.params as { id: string };
-  const b = (req.body || {}) as Partial<{ tags: string[]; notes: string; hidden: boolean; home: string; away: string; sport: string; league: string }>;
+  const b = (req.body || {}) as UpdateBetBody;
   try {
     const bet = await betRepo().findOneBy({ id, userId });
     if (!bet) return reply.code(404).send(createResponse(0, 'Aposta não encontrada.', []));
+
+    // ---- cabeçalho ----
     if (b.tags !== undefined) bet.tags = Array.isArray(b.tags) ? b.tags.map((t) => String(t).slice(0, 40)).slice(0, 20) : null;
     if (b.notes !== undefined) bet.notes = b.notes ? String(b.notes).slice(0, 2000) : null;
     if (b.hidden !== undefined) bet.hidden = !!b.hidden;
@@ -479,8 +537,67 @@ export const updateBet = async (req: FastifyRequest, reply: FastifyReply) => {
     if (b.away !== undefined) bet.away = b.away ? String(b.away).slice(0, 160) : null;
     if (b.sport !== undefined) bet.sport = b.sport ? String(b.sport).slice(0, 60) : null;
     if (b.league !== undefined) bet.league = b.league ? String(b.league).slice(0, 120) : null;
+    if (b.eventStart !== undefined) bet.eventStart = parseDate(b.eventStart) || null;
+    if (b.bankrollId) {
+      const owned = await bankrollRepo().findOneBy({ id: b.bankrollId, userId });
+      if (!owned) return reply.code(404).send(createResponse(0, 'Banca não encontrada.', []));
+      bet.bankrollId = b.bankrollId;
+    }
+
+    // ---- pernas (edição de casa/odd/stake/seleção/mercado) ----
+    // Reconstrói as pernas a partir do corpo, PRESERVANDO o status já liquidado
+    // (casando pela id da perna existente); o lucro realizado é recalculado.
+    if (Array.isArray(b.legs) && b.legs.length > 0) {
+      const oldById = new Map((bet.legs || []).map((l) => [l.id, l]));
+      const built = buildBetLegs({ betType: b.betType, totalStake: b.totalStake, legs: b.legs });
+      let newLegs = built.legs;
+
+      if (built.betType === BetType.MULTI) {
+        // Múltipla = 1 perna; herda id/status da perna multi anterior (se existia).
+        const prev = (bet.legs || [])[0];
+        const leg = newLegs[0];
+        if (prev) {
+          leg.id = prev.id;
+          leg.status = prev.status;
+          leg.settledReturn = prev.settledReturn;
+          leg.settledAt = prev.settledAt;
+          leg.legProfit = svc.isResolvedLeg(prev.status) ? String(svc.legPnl(leg)) : null;
+        }
+      } else {
+        // simples/surebet: casa cada perna nova com a existente (por id) p/ manter status.
+        newLegs = b.legs.map((src, i) => {
+          const leg = built.legs[i];
+          const ex = src.id ? oldById.get(String(src.id)) : null;
+          if (ex) {
+            leg.id = ex.id;
+            leg.status = ex.status;
+            leg.settledReturn = ex.settledReturn;
+            leg.settledAt = ex.settledAt;
+            leg.legProfit = svc.isResolvedLeg(ex.status) ? String(svc.legPnl(leg)) : null;
+          }
+          return leg;
+        });
+      }
+
+      // Remove as pernas que sumiram na edição.
+      const keep = new Set(newLegs.map((l) => l.id).filter(Boolean));
+      const toRemove = (bet.legs || []).filter((l) => !keep.has(l.id));
+      if (toRemove.length) await legRepo().remove(toRemove);
+
+      bet.legs = newLegs;
+      bet.betType = built.betType;
+      bet.totalStake = String(built.totalStake);
+      bet.status = svc.deriveBetStatus(newLegs);
+      const realized = svc.betRealizedProfit(newLegs);
+      bet.realizedProfit = newLegs.some((l) => svc.isResolvedLeg(l.status)) ? String(realized) : null;
+      const fullySettled = bet.status === BetStatus.SETTLED || bet.status === BetStatus.VOID;
+      bet.settledAt = fullySettled ? (bet.settledAt || new Date()) : null;
+      bet.lockedAt = fullySettled ? (bet.lockedAt || new Date()) : null;
+    }
+
     const saved = await betRepo().save(bet);
-    return reply.send(createResponse(1, 'Aposta atualizada.', svc.serializeBet(saved)));
+    const full = await betRepo().findOneBy({ id: saved.id });
+    return reply.send(createResponse(1, 'Aposta atualizada.', full ? svc.serializeBet(full) : svc.serializeBet(saved)));
   } catch (error) {
     return reply.code(500).send(createResponse(0, 'Erro ao atualizar aposta.', { error: (error as Error).message }));
   }
@@ -547,6 +664,53 @@ export const deleteBet = async (req: FastifyRequest, reply: FastifyReply) => {
     return reply.send(createResponse(1, 'Aposta removida.', { id }));
   } catch (error) {
     return reply.code(500).send(createResponse(0, 'Erro ao remover aposta.', { error: (error as Error).message }));
+  }
+};
+
+/**
+ * DELETE /analytix/bets/:id/legs/:legId — remove UMA perna.
+ * Cada perna é tratada como uma aposta individual na lista. Se era a última
+ * perna, a aposta inteira é removida; senão, o cabeçalho (totalStake, status,
+ * lucro realizado, betType) é recalculado a partir das pernas restantes.
+ */
+export const deleteLeg = async (req: FastifyRequest, reply: FastifyReply) => {
+  const userId = uid(req);
+  if (!userId) return reply.code(401).send(createResponse(0, 'Não autenticado.', []));
+  const { id, legId } = req.params as { id: string; legId: string };
+  try {
+    const bet = await betRepo().findOneBy({ id, userId });
+    if (!bet) return reply.code(404).send(createResponse(0, 'Aposta não encontrada.', []));
+
+    const legs = bet.legs || [];
+    const leg = legs.find((l) => l.id === legId);
+    if (!leg) return reply.code(404).send(createResponse(0, 'Perna não encontrada.', []));
+
+    const remaining = legs.filter((l) => l.id !== legId);
+
+    // Última perna → remove a aposta inteira (cascade apaga a perna).
+    if (remaining.length === 0) {
+      await betRepo().remove(bet);
+      return reply.send(createResponse(1, 'Aposta removida.', { id, deletedBet: true }));
+    }
+
+    await legRepo().remove(leg);
+
+    const now = new Date();
+    bet.legs = remaining;
+    bet.betType = remaining.length === 1 ? BetType.SINGLE : BetType.ARB;
+    bet.totalStake = String(svc.n(remaining.reduce((a, l) => a + svc.n(l.stake), 0)));
+    bet.status = svc.deriveBetStatus(remaining);
+    const realized = svc.betRealizedProfit(remaining);
+    bet.realizedProfit = remaining.some((l) => svc.isResolvedLeg(l.status)) ? String(realized) : null;
+    const fullySettled = bet.status === BetStatus.SETTLED || bet.status === BetStatus.VOID;
+    bet.settledAt = fullySettled ? (bet.settledAt || now) : null;
+    bet.lockedAt = fullySettled ? (bet.lockedAt || now) : null;
+
+    const saved = await betRepo().save(bet);
+    const full = await betRepo().findOneBy({ id: saved.id });
+    return reply.send(createResponse(1, 'Perna removida.', full ? svc.serializeBet(full) : { id, deletedBet: true }));
+  } catch (error) {
+    return reply.code(500).send(createResponse(0, 'Erro ao remover perna.', { error: (error as Error).message }));
   }
 };
 

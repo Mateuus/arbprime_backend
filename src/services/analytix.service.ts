@@ -1,5 +1,5 @@
 import { Bet, BetLeg, Bankroll, BankrollTransaction, UserBookmakerAccount, Partner } from '@Entities';
-import { LegStatus, BetStatus, BetType, TxType } from '@Enums';
+import { LegStatus, BetStatus, BetType, BetSide, TxType } from '@Enums';
 
 /**
  * Núcleo de cálculo do Analytix. FONTE ÚNICA da lógica de P&L: tanto a
@@ -28,11 +28,30 @@ export const isResolvedLeg = (s: LegStatus): boolean =>
  * FREEBET (SNR — stake not returned): o stake não é dinheiro seu, então ganhar
  * rende só o lucro (S*(O-1)) e perder NÃO gera prejuízo (0).
  */
-export const legPnl = (leg: Pick<BetLeg, 'status' | 'stake' | 'odd' | 'commissionPct' | 'settledReturn' | 'isFreebet'>): number => {
+export const legPnl = (leg: Pick<BetLeg, 'status' | 'stake' | 'odd' | 'commissionPct' | 'settledReturn' | 'isFreebet' | 'side'>): number => {
   const S = n(leg.stake);
   const O = n(leg.odd);
   const c = n(leg.commissionPct) / 100;
   const fb = !!leg.isFreebet;
+
+  // LAY (contra): `stake` = aposta do "backer" (o que você embolsa se a seleção
+  // NÃO sair). Responsabilidade (liability) = S*(O-1) = o que você arrisca.
+  // "won" = a SUA lay venceu (a seleção não saiu); "lost" = a lay perdeu.
+  if (leg.side === BetSide.LAY) {
+    const liability = S * (O - 1);
+    switch (leg.status) {
+      case LegStatus.WON: return round2(S * (1 - c));
+      case LegStatus.HALF_WON: return round2((S * (1 - c)) / 2);
+      case LegStatus.LOST: return round2(-liability);
+      case LegStatus.HALF_LOST: return round2(-liability / 2);
+      case LegStatus.CASHOUT: return round2(n(leg.settledReturn) - liability);
+      case LegStatus.VOID:
+      case LegStatus.PENDING:
+      default:
+        return 0;
+    }
+  }
+
   switch (leg.status) {
     case LegStatus.WON: return round2(S * (O - 1) * (1 - c));
     case LegStatus.HALF_WON: return round2((S / 2) * (O - 1) * (1 - c));
@@ -46,16 +65,25 @@ export const legPnl = (leg: Pick<BetLeg, 'status' | 'stake' | 'odd' | 'commissio
   }
 };
 
-// Giro: stake conta no volume só quando a perna foi resolvida (anuladas/pendentes
-// e freebets ficam fora — freebet não é dinheiro seu).
-export const legTurnover = (leg: Pick<BetLeg, 'status' | 'stake' | 'isFreebet'>): number =>
-  (isResolvedLeg(leg.status) && !leg.isFreebet) ? n(leg.stake) : 0;
+// Exposição (dinheiro em risco) de uma perna: back = stake; lay = responsabilidade
+// (S*(O-1)); freebet = 0 (não é dinheiro seu).
+export const legExposure = (leg: Pick<BetLeg, 'stake' | 'odd' | 'side' | 'isFreebet'>): number => {
+  if (leg.isFreebet) return 0;
+  const S = n(leg.stake);
+  return leg.side === BetSide.LAY ? round2(S * (n(leg.odd) - 1)) : round2(S);
+};
+
+// Giro: dinheiro em risco que conta no volume só quando a perna foi resolvida
+// (anuladas/pendentes e freebets ficam fora).
+export const legTurnover = (leg: Pick<BetLeg, 'status' | 'stake' | 'odd' | 'side' | 'isFreebet'>): number =>
+  (isResolvedLeg(leg.status) && !leg.isFreebet) ? legExposure(leg) : 0;
 
 // Retorno bruto potencial (se a perna ganhar) — só para exibição.
-export const legPotentialReturn = (leg: Pick<BetLeg, 'stake' | 'odd' | 'commissionPct' | 'isFreebet'>): number => {
+export const legPotentialReturn = (leg: Pick<BetLeg, 'stake' | 'odd' | 'commissionPct' | 'isFreebet' | 'side'>): number => {
   const S = n(leg.stake);
   const O = n(leg.odd);
   const c = n(leg.commissionPct) / 100;
+  if (leg.side === BetSide.LAY) return round2(S * (1 - c)); // lay vencendo embolsa o stake do backer
   const profit = S * (O - 1) * (1 - c);
   return round2(leg.isFreebet ? profit : S + profit);
 };
@@ -71,10 +99,10 @@ export const deriveBetStatus = (legs: Pick<BetLeg, 'status'>[]): BetStatus => {
   return BetStatus.PARTIALLY_SETTLED;
 };
 
-export const betRealizedProfit = (legs: Pick<BetLeg, 'status' | 'stake' | 'odd' | 'commissionPct' | 'settledReturn' | 'isFreebet'>[]): number =>
+export const betRealizedProfit = (legs: Pick<BetLeg, 'status' | 'stake' | 'odd' | 'commissionPct' | 'settledReturn' | 'isFreebet' | 'side'>[]): number =>
   round2(legs.reduce((acc, l) => acc + legPnl(l), 0));
 
-export const betTurnover = (legs: Pick<BetLeg, 'status' | 'stake' | 'isFreebet'>[]): number =>
+export const betTurnover = (legs: Pick<BetLeg, 'status' | 'stake' | 'odd' | 'side' | 'isFreebet'>[]): number =>
   round2(legs.reduce((acc, l) => acc + legTurnover(l), 0));
 
 const betHasResolved = (bet: Bet): boolean => (bet.legs || []).some((l) => isResolvedLeg(l.status));
@@ -108,6 +136,10 @@ export const serializeLeg = (leg: BetLeg) => ({
   settledReturn: leg.settledReturn == null ? null : n(leg.settledReturn),
   legProfit: leg.legProfit == null ? null : n(leg.legProfit),
   potentialReturn: legPotentialReturn(leg),
+  // Seleções da múltipla (só em betType='multi'); normaliza a odd para número.
+  selections: Array.isArray(leg.selections)
+    ? leg.selections.map((s) => ({ market: s.market ?? null, rawMarket: s.rawMarket ?? null, selection: s.selection ?? null, handicap: s.handicap ?? null, odd: n(s.odd) }))
+    : null,
   settledAt: leg.settledAt,
 });
 
@@ -213,6 +245,7 @@ export interface AnalytixSummary {
   betsCount: number;
   openCount: number;
   settledCount: number;
+  pendingStake: number; // exposição: stake (real) parado em pernas ainda pendentes
   currentBankroll: number;
   roiBase: number;
 }
@@ -237,6 +270,7 @@ export const computeSummary = (
   let losses = 0;
   let openCount = 0;
   let settledCount = 0;
+  let pendingStake = 0;
 
   for (const bet of ranged) {
     const legs = bet.legs || [];
@@ -248,6 +282,8 @@ export const computeSummary = (
         oddWeighted += n(l.odd) * n(l.stake);
         oddWeight += n(l.stake);
       }
+      // Exposição: dinheiro em risco ainda em jogo (back=stake, lay=responsabilidade).
+      if (l.status === LegStatus.PENDING) pendingStake += legExposure(l);
     }
 
     if (bet.status === BetStatus.OPEN || bet.status === BetStatus.PARTIALLY_SETTLED) openCount++;
@@ -273,6 +309,7 @@ export const computeSummary = (
     betsCount: ranged.length,
     openCount,
     settledCount,
+    pendingStake: round2(pendingStake),
     currentBankroll: round2(roiBase + allTx + allProfit),
     roiBase: round2(roiBase),
   };
