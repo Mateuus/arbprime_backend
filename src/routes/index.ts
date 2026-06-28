@@ -22,6 +22,7 @@ import affiliateRoutes from "./affiliate.routes";
 import couponsRoutes from "./coupons.routes";
 import adminAffiliateRoutes from "./adminAffiliate.routes";
 import adminCouponsRoutes from "./adminCoupons.routes";
+import statusRoutes from "./status.routes";
 
 export default async function routes(app: FastifyInstance) {
   app.register(homeRoutes);
@@ -47,4 +48,5 @@ export default async function routes(app: FastifyInstance) {
   app.register(couponsRoutes, { prefix: "/coupons" });
   app.register(adminAffiliateRoutes, { prefix: "/admin/affiliates" });
   app.register(adminCouponsRoutes, { prefix: "/admin/coupons" });
+  app.register(statusRoutes, { prefix: "/status" });
 }

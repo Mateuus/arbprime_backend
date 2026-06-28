@@ -19,3 +19,4 @@ export * from './valuebet-config.controller';
 export * from './valuebet-clv.controller';
 export * from './affiliate.controller';
 export * from './affiliateAdmin.controller';
+export * from './status.controller';
