@@ -2,7 +2,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import jwt from 'jsonwebtoken';
 import dotenv from "dotenv";
 import { logger, LoggerClass } from "@Core/logger";
-import { getFormattedSurebets, getFormattedValuebets, getArbitragePairs, calculateArbitrage } from "@utils/functions";
+import { getFormattedSurebets, getFormattedValuebets, getFormattedMiddles, getArbitragePairs, calculateArbitrage } from "@utils/functions";
 import { UserData } from "@Interfaces";
 
 dotenv.config();
@@ -28,6 +28,10 @@ async function handleSingleRequest(ws: WebSocket, method: string, options: Recor
 
     if (method === "valuebet") {
       data = await getFormattedValuebets(options.type as string, options, user);
+    }
+
+    if (method === "middles") {
+      data = await getFormattedMiddles(options.type as string, options, user);
     }
 
     if (method === "arbitrage_pairs") {
@@ -75,6 +79,10 @@ async function handleAutoBroadcast(method: string) {
 
     if (method === 'valuebet') {
       data = await getFormattedValuebets(type, options, user);
+    }
+
+    if (method === 'middles') {
+      data = await getFormattedMiddles(type, options, user);
     }
 
     if (method === 'arbitrage_pairs') {
@@ -172,6 +180,7 @@ export function startWebSocketServer() {
     // Broadcast de métodos com autoUpdate
     setInterval(() => handleAutoBroadcast("arbitrage_betting"), 5000);
     setInterval(() => handleAutoBroadcast("valuebet"), 5000);
+    setInterval(() => handleAutoBroadcast("middles"), 5000);
     setInterval(() => handleAutoBroadcast("arbitrage_pairs"), 1000);
     setInterval(() => handleAutoBroadcast("monitor_pairs"), 1000);
 }

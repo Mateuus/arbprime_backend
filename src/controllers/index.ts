@@ -17,6 +17,7 @@ export * from './analytix.controller';
 export * from './community.controller';
 export * from './valuebet-config.controller';
 export * from './valuebet-clv.controller';
+export * from './middles.controller';
 export * from './affiliate.controller';
 export * from './affiliateAdmin.controller';
 export * from './status.controller';
