@@ -3,7 +3,7 @@ import fs from 'fs';
 import dotenv from "dotenv";
 import { getRedisClient } from '@Core/redis';
 import { getExclusionSets } from '@Core/eventExclusionCache';
-import { MonitorOptions, SurebetData, UserData, ValuebetGroup } from '@Interfaces';
+import { MiddleData, MonitorOptions, SurebetData, UserData, ValuebetGroup } from '@Interfaces';
 import stringSimilarity from "string-similarity";
 import levenshtein from "fast-levenshtein";
 dotenv.config();
@@ -15,6 +15,9 @@ const VALUEBET_LIST_PREMATCH_HASH_RKEY = process.env.VALUEBET_LIST_PREMATCH_HASH
 // Duplo Green (DG): feed espelhado dos surebets (mesmo shape SurebetData), gerado
 // pelo arbbetting_master. Selecionado via options.type === 'duplogreen'.
 const DG_LIST_PREMATCH_HASH_RKEY = process.env.DG_LIST_PREMATCH_HASH_RKEY || 'DuploGreenPrematch';
+// Middles (apostas de intervalo): feed irmão das surebets (mesmo Redis), gerado
+// pelo arbbetting_master. HASH `ArbBetting:MiddleListPrematch` (campo = groupId).
+const MIDDLE_LIST_PREMATCH_HASH_RKEY = process.env.MIDDLE_LIST_PREMATCH_HASH_RKEY || 'MiddleListPrematch';
 const TEAM_ALIAS_HASH = "ArbPrime:Configs:TeamAliases";
 
 const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || "0.85"); // Padrão: 85%
@@ -336,6 +339,67 @@ export async function getFormattedValuebets(_type?: string, _options?: Record<st
       return filtered;
     } catch (error) {
       console.error('Erro ao processar value bets:', error);
+      return [];
+    }
+}
+
+/**
+ * Lê os middles (apostas de intervalo) VIVOS do Redis (HASH
+ * `ArbBetting:MiddleListPrematch`, campo = groupId, valor = MiddleData).
+ * Espelha getFormattedSurebets/getFormattedValuebets:
+ *  - parseia cada grupo e ordena os middles por EV DESC (melhor primeiro);
+ *  - define bestEv = melhor EV do evento;
+ *  - reaproveita as exclusões GLOBAIS (admin): remove evento inteiro (group) ou
+ *    descarta middles que usem uma casa excluída (house = `bookmaker:eventId`) ou
+ *    um mercado específico de uma casa;
+ *  - ordena os EVENTOS por data ASC (cronológico — jogos mais próximos no topo).
+ * Todos os números (ev, pGap, profitIfHit, lossIfMiss, stakePct) já vêm prontos
+ * do robô; aqui NÃO recalculamos nada — só repassamos.
+ */
+export async function getFormattedMiddles(_type?: string, _options?: Record<string, unknown>, _user?: UserData | null): Promise<MiddleData[]> {
+    try {
+      const redisClient = getRedisClient();
+      const raw = await redisClient.hgetall(`${ARB_FOLDER_BASE_RKEY}:${MIDDLE_LIST_PREMATCH_HASH_RKEY}`);
+      const entries = Object.entries(raw);
+
+      const parsed: MiddleData[] = entries.map(([, json]) => {
+        const data = JSON.parse(json as string) as MiddleData;
+        const list = Array.isArray(data.middles) ? data.middles : [];
+        list.sort((a, b) => (b.ev || 0) - (a.ev || 0));
+        data.middles = list;
+        data.bestEv = list[0]?.ev ?? 0;
+        return data;
+      });
+
+      // Exclusões GLOBAIS (admin): mesmo cache das surebets (house/market/event).
+      const { houses, markets, groups } = await getExclusionSets();
+      const filtered = (houses.size === 0 && markets.size === 0 && groups.size === 0)
+        ? parsed
+        : parsed.reduce<MiddleData[]>((acc, ev) => {
+            if (groups.has(ev.id)) return acc; // evento inteiro excluído
+            const keep = ev.middles.filter(
+              (md) => !md.legs.some((leg) => {
+                const house = `${(leg.bookmaker || '').toLowerCase()}:${leg.eventId}`;
+                return houses.has(house) || markets.has(`${house}:${leg.market}`);
+              })
+            );
+            if (keep.length === 0) return acc; // sobrou nada -> remove o evento
+            ev.middles = keep;
+            ev.bestEv = keep[0]?.ev ?? 0;
+            acc.push(ev);
+            return acc;
+          }, []);
+
+      // Eventos por data ASC (jogos mais próximos primeiro); sem data válida vai p/ o fim.
+      filtered.sort((a, b) => {
+        const ta = new Date(a.date).getTime();
+        const tb = new Date(b.date).getTime();
+        return (Number.isFinite(ta) ? ta : Infinity) - (Number.isFinite(tb) ? tb : Infinity);
+      });
+
+      return filtered;
+    } catch (error) {
+      console.error('Erro ao processar middles:', error);
       return [];
     }
 }
