@@ -107,6 +107,11 @@ interface GroupedEvent {
 
 interface LeagueMeta { canonicalName: string; country: string | null; countryKey: string | null }
 
+// O event_date vem como wallclock de Brasília (GMT-3) tagueado com Z. O instante
+// REAL do jogo é esse valor + 3h (BRT = UTC-3). Usado só nos cortes temporais
+// (próximos/encerrados); a EXIBIÇÃO continua mostrando o wallclock cru.
+const EVENT_TZ_OFFSET_MS = 3 * 60 * 60 * 1000;
+
 /**
  * Carrega leagues + league_aliases (read) e devolve um resolvedor: dado um
  * league_id já conhecido (grupos têm), ou um (sport, casa, nome cru) (solitários),
@@ -270,18 +275,19 @@ async function loadGroupedItems(f: GroupFilters): Promise<GroupedEvent[]> {
     houses: [{ bookmaker: e.bookmaker, eventId: e.eventId, home: e.home, away: e.away, inverted: false, link: e.link }]
   }));
 
-  // Filtro PRECISO de próximos/encerrados em JS — NÃO em SQL. O arbbetting grava
-  // event_date em horário LOCAL (naive); o MySQL roda em UTC, então
-  // `event_date >= NOW()` errava pelo offset do fuso (um jogo das 17:00 fica salvo
-  // como "14:00" e era comparado com NOW() em UTC → caía em "Encerrados"). Aqui
-  // comparamos o MESMO Date que a UI exibe (o driver converte igual na leitura e
-  // na serialização), então o filtro e o horário mostrado SEMPRE batem.
+  // Filtro PRECISO de próximos/encerrados em JS — NÃO em SQL. O event_date é o
+  // WALLCLOCK de Brasília (GMT-3) "tagueado com Z" (ex.: "2026-06-30T22:00:00Z"
+  // = 22:00 BRT, e NÃO 22:00 UTC). O INSTANTE real do jogo é esse wallclock + 3h
+  // (BRT = UTC-3). Para o corte "já começou?" comparamos o INSTANTE REAL contra
+  // agora (UTC real) — senão um jogo das 22:00 BRT cairia em "Encerrados" às
+  // 19:00 BRT (3h cedo). A EXIBIÇÃO usa o wallclock cru (frontend timeZone:'UTC');
+  // o corte usa o instante real. São frames diferentes de propósito.
   let items = groupItems.concat(soloItems);
   if (f.upcomingOnly || f.pastOnly) {
     const now = Date.now();
     items = items.filter((it) => {
       if (!it.eventDate) return false;
-      const t = new Date(it.eventDate).getTime();
+      const t = new Date(it.eventDate).getTime() + EVENT_TZ_OFFSET_MS;
       return f.upcomingOnly ? t >= now : t < now;
     });
   }
@@ -410,8 +416,11 @@ export const getExternalEvents = async (req: FastifyRequest, reply: FastifyReply
         })
       );
     }
-    if (upcomingOnly === "true") qb.andWhere("e.eventDate >= NOW()");
-    if (pastOnly === "true") qb.andWhere("e.eventDate < NOW()");
+    // event_date é wallclock BRT (GMT-3) tagueado Z; o instante real é +3h. Em vez
+    // de DATE_ADD na coluna (quebra índice), recuamos o NOW() em 3h (sargável):
+    // event_date + 3h >= NOW()  ⟺  event_date >= NOW() - 3h. (MySQL .210 roda em UTC.)
+    if (upcomingOnly === "true") qb.andWhere("e.eventDate >= DATE_SUB(NOW(), INTERVAL 3 HOUR)");
+    if (pastOnly === "true") qb.andWhere("e.eventDate < DATE_SUB(NOW(), INTERVAL 3 HOUR)");
     if (dateFrom) qb.andWhere("e.eventDate >= :dateFrom", { dateFrom });
     if (dateTo) qb.andWhere("e.eventDate <= :dateTo", { dateTo });
 
