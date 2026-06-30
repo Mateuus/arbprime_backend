@@ -15,6 +15,7 @@ const VALUEBET_LIST_PREMATCH_HASH_RKEY = process.env.VALUEBET_LIST_PREMATCH_HASH
 // Duplo Green (DG): feed espelhado dos surebets (mesmo shape SurebetData), gerado
 // pelo arbbetting_master. Selecionado via options.type === 'duplogreen'.
 const DG_LIST_PREMATCH_HASH_RKEY = process.env.DG_LIST_PREMATCH_HASH_RKEY || 'DuploGreenPrematch';
+const DV_LIST_PREMATCH_HASH_RKEY = process.env.DV_LIST_PREMATCH_HASH_RKEY || 'DuasVidasPrematch';
 // Middles (apostas de intervalo): feed irmão das surebets (mesmo Redis), gerado
 // pelo arbbetting_master. HASH `ArbBetting:MiddleListPrematch` (campo = groupId).
 const MIDDLE_LIST_PREMATCH_HASH_RKEY = process.env.MIDDLE_LIST_PREMATCH_HASH_RKEY || 'MiddleListPrematch';
@@ -237,13 +238,16 @@ export const getWorkerPath = (fileName: string): string => {
  */
 export async function getFormattedSurebets(type: string, options?: Record<string, unknown>, user?: UserData | null): Promise<SurebetData[]> {
     try {
-      // Duplo Green reusa esta função: o type roteia a key. Mesmo shape SurebetData,
-      // mesma ordenação por profitMargin e mesmas exclusões admin a seguir.
+      // Duplo Green e Duas Vidas reusam esta função: o type roteia a key. Mesmo shape
+      // SurebetData, mesma ordenação por profitMargin (Duas Vidas usa a margem APARENTE
+      // como profitMargin) e mesmas exclusões admin a seguir.
       const ARB_LIST_RKEY = type === 'duplogreen'
         ? DG_LIST_PREMATCH_HASH_RKEY
-        : type === 'live'
-          ? ARB_LIST_LIVE_HASH_RKEY
-          : ARB_LIST_PREMATCH_HASH_RKEY;
+        : type === 'duasvidas'
+          ? DV_LIST_PREMATCH_HASH_RKEY
+          : type === 'live'
+            ? ARB_LIST_LIVE_HASH_RKEY
+            : ARB_LIST_PREMATCH_HASH_RKEY;
       const redisClient = getRedisClient();
       const raw = await redisClient.hgetall(`${ARB_FOLDER_BASE_RKEY}:${ARB_LIST_RKEY}`);
       const entries = Object.entries(raw);
