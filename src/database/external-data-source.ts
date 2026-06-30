@@ -31,6 +31,15 @@ const databaseName = process.env.NODE_ENV === 'production'
 
 export const ExternalDataSource = new DataSource({
   type: 'mysql',
+  // O event_groups.event_date é um DATETIME "naive" cujo wallclock já é o horário
+  // de Brasília (ex.: "2026-06-30 22:00:00" = 22:00 BRT). Sem pinar o fuso, o
+  // mysql2 interpreta esse DATETIME no fuso do PROCESSO (UTC em prod .103, BRT no
+  // dev WSL) → o ISO serializado mudava de servidor p/ servidor (22:00Z vs 01:00Z).
+  // Pinando 'Z' (UTC), o DATETIME é lido VERBATIM como "…22:00:00.000Z" em qualquer
+  // servidor — mesma convenção "GMT-3 tagueado Z" das listas do Redis. O frontend
+  // formata com timeZone:'UTC' (ver arbprime_frontend/src/utils/eventTime.ts).
+  // Em prod (servidor UTC) isto é no-op; só conserta dev/servidores não-UTC.
+  timezone: 'Z',
   host: process.env.ARBBET_DB_HOST || process.env.DB_HOST,
   port,
   username: process.env.ARBBET_DB_USER || process.env.DB_USER,
