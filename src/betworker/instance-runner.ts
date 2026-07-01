@@ -141,16 +141,20 @@ export class InstanceRunner {
 
       const balance = this.bankrollId ? await getBankrollBalance(this.bankrollId) : 0;
       let acted = 0;
+      let dedupeSkips = 0;
+      let capSkips = 0;
+      let stakeSkips = 0;
 
       for (const vb of matched) {
         if (!this.running) break;
         const key = dedupeKey(this.cfg.dedupeScope, vb);
-        if (this.placed.has(key) || (await bus.isPlaced(this.id, key))) continue;
-        if ((await bus.getEventCount(this.id, vb.eventId)) >= this.cfg.maxBetsPerEvent) continue;
+        if (this.placed.has(key) || (await bus.isPlaced(this.id, key))) { dedupeSkips++; continue; }
+        if ((await bus.getEventCount(this.id, vb.eventId)) >= this.cfg.maxBetsPerEvent) { capSkips++; continue; }
         if (this.cfg.maxBetsPerDay != null && day.bets >= this.cfg.maxBetsPerDay) break;
 
         const st = computeStake(vb, this.cfg, { bankrollBalance: balance });
         if (st.skip) {
+          stakeSkips++;
           const nk = 'skip:' + key;
           if (!this.dryLogged.has(nk)) {
             this.dryLogged.add(nk);
@@ -160,14 +164,18 @@ export class InstanceRunner {
           }
           continue;
         }
-        if (this.cfg.maxStakePerDay != null && day.stake + st.stake > this.cfg.maxStakePerDay) continue;
+        if (this.cfg.maxStakePerDay != null && day.stake + st.stake > this.cfg.maxStakePerDay) { capSkips++; continue; }
 
         await this.tryPlace(vb, key, st.stake, day);
         acted++;
       }
 
       await this.heartbeat();
-      if (acted === 0) await this.maybeDiag(`${matched.length} valuebet(s) elegível(is), mas 0 apostada(s) (dedupe/stake/limite) — saldo banca R$${balance.toFixed(2)}`);
+      if (acted === 0) {
+        await this.maybeDiag(
+          `${matched.length} elegível(is), 0 nova(s): ${dedupeSkips} já apostada(s) (dedupe), ${stakeSkips} por stake, ${capSkips} por limite — saldo banca R$${balance.toFixed(2)}`,
+        );
+      }
     } finally {
       this.ticking = false;
     }
