@@ -6,6 +6,7 @@
  * (idempotência via índice único) e houseBetId (elo p/ conferir no histórico da
  * casa). Duplicata (mesmo instanceId+emissionId) é tratada como skip, não erro.
  */
+import { In } from 'typeorm';
 import { AppDataSource } from '../../database/data-source';
 import { Bet } from '../../database/entities/Bet';
 import { BetLeg } from '../../database/entities/BetLeg';
@@ -13,9 +14,9 @@ import { Bankroll } from '../../database/entities/Bankroll';
 import { BankrollTransaction } from '../../database/entities/BankrollTransaction';
 import { BetInstance } from '../../database/entities/BetInstance';
 import { BetInstanceEvent } from '../../database/entities/BetInstanceEvent';
-import { BetType, BetStatus, LegStatus, BetSide } from '../../enums/analytix.enum';
+import { BetType, BetStatus, LegStatus, BetSide, RESOLVED_LEG_STATUSES } from '../../enums/analytix.enum';
 import { InstanceEventType, BET_SOURCE_INSTANCE } from '../../enums/bet-instance.enum';
-import { computeBankrollBalance } from '../analytix.service';
+import { computeBankrollBalance, deriveBetStatus } from '../analytix.service';
 import { FlatValuebet } from '../../betworker/valuebet-source';
 import { PlaceResult } from '../../betbot/betano/betano-client';
 import { decryptSecret, isEncryptionConfigured } from '../../utils/crypto';
@@ -139,6 +140,58 @@ export async function recordInstanceBet(input: RecordBetInput): Promise<{ bet?: 
     if (code === 'ER_DUP_ENTRY') return { duplicate: true };
     throw e;
   }
+}
+
+export interface SettleInfo {
+  result: 'won' | 'lost' | 'void' | 'cashout';
+  grossReturn: number;
+  profit: number;
+}
+
+const LEG_STATUS_FOR: Record<SettleInfo['result'], LegStatus> = {
+  won: LegStatus.WON, lost: LegStatus.LOST, void: LegStatus.VOID, cashout: LegStatus.CASHOUT,
+};
+
+/**
+ * Liquida (settle) apostas da INSTÂNCIA a partir do histórico da casa. Só toca
+ * apostas `source='instance'` com `houseBetId` — NUNCA as manuais do Analytix.
+ * Casa por `houseBetId`; deriva P&L do retorno realizado (ver resolveSettledOutcome).
+ */
+export async function settleInstanceBets(
+  instanceId: string,
+  byHouseBetId: Map<string, SettleInfo>,
+): Promise<{ settled: number; details: string[] }> {
+  const betRepo = AppDataSource.getRepository(Bet);
+  const openBets = await betRepo.find({
+    where: { instanceId, source: BET_SOURCE_INSTANCE, status: In([BetStatus.OPEN, BetStatus.PARTIALLY_SETTLED]) },
+  });
+  let settled = 0;
+  const details: string[] = [];
+  for (const bet of openBets) {
+    let changed = false;
+    for (const leg of bet.legs || []) {
+      if (!leg.houseBetId || RESOLVED_LEG_STATUSES.includes(leg.status)) continue;
+      const info = byHouseBetId.get(String(leg.houseBetId));
+      if (!info) continue;
+      leg.status = LEG_STATUS_FOR[info.result];
+      leg.settledReturn = info.grossReturn.toFixed(2);
+      leg.legProfit = info.profit.toFixed(2);
+      leg.settledAt = new Date();
+      changed = true;
+      details.push(`${leg.houseBetId}→${info.result}(${info.profit >= 0 ? '+' : ''}${info.profit.toFixed(2)})`);
+    }
+    if (changed) {
+      bet.status = deriveBetStatus(bet.legs);
+      bet.realizedProfit = (bet.legs || []).reduce((a, l) => a + (l.legProfit ? Number(l.legProfit) : 0), 0).toFixed(2);
+      if (bet.status === BetStatus.SETTLED || bet.status === BetStatus.VOID) {
+        bet.settledAt = new Date();
+        bet.lockedAt = new Date();
+      }
+      await betRepo.save(bet);
+      settled++;
+    }
+  }
+  return { settled, details };
 }
 
 /** Registra um evento de auditoria (log ao vivo da UI). */

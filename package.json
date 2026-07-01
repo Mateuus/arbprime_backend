@@ -12,6 +12,8 @@
     "dev:server": "nodemon --exec 'node --max-old-space-size=8192 -r ts-node/register -r module-alias/register ./src/core/server.ts'",
     "start:workers": "node dist/workers/initWorkers.js",
     "dev:workers": "nodemon --exec 'node --max-old-space-size=8192 -r ts-node/register -r module-alias/register ./src/workers/initWorkers.ts'",
+    "betworker": "node -r module-alias/register dist/betworker/index.js",
+    "betworker:dev": "nodemon --exec 'TS_NODE_TRANSPILE_ONLY=1 node -r ts-node/register -r ./src/module-alias.ts ./src/betworker/index.ts'",
     "pm2:start": "pm2 start ecosystem.config.js",
     "pm2:restart": "pm2 restart all",
     "pm2:stop": "pm2 stop all",

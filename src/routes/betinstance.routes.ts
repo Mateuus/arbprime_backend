@@ -2,7 +2,7 @@ import { FastifyInstance } from "fastify";
 import {
   listInstances, getInstance, createInstance, updateInstance, deleteInstance,
   startInstance, pauseInstance, stopInstance, testLogin, listInstanceEvents,
-  listInstanceProxies, checkInstanceProxies,
+  listInstanceProxies, checkInstanceProxies, clearInstanceEvents,
 } from "@Controllers";
 import { checkAuth } from "../middlewares/auth.middleware";
 
@@ -26,4 +26,5 @@ export default async function betInstanceRoutes(app: FastifyInstance) {
   app.post("/:id/pause", auth, pauseInstance);
   app.post("/:id/stop", auth, stopInstance);
   app.get("/:id/events", auth, listInstanceEvents);
+  app.delete("/:id/events", auth, clearInstanceEvents);
 }

@@ -12,6 +12,7 @@ import { AppDataSource } from '../database/data-source';
 import { InstanceStatus, InstanceEventType } from '../enums/bet-instance.enum';
 import { BetanoClient, BetanoCredentials } from '../betbot/betano/betano-client';
 import { BetanoError } from '../betbot/betano/errors';
+import { resolveSettledOutcome } from '../betbot/betano/betano-status';
 import { loadProxyById } from '../betbot/proxy-list';
 import { Proxy } from '../betbot/http';
 import { decryptSecret } from '../utils/crypto';
@@ -21,6 +22,7 @@ import { dedupeKey } from './dedupe';
 import * as bus from './bus';
 import {
   recordInstanceBet, logInstanceEvent, resolveInstanceBankroll, getBankrollBalance,
+  settleInstanceBets, SettleInfo,
 } from '../services/betinstance/betinstance.service';
 
 export class InstanceRunner {
@@ -35,6 +37,8 @@ export class InstanceRunner {
   private ticking = false;
   private running = false;
   private timer: NodeJS.Timeout | null = null;
+  private lastDiagAt = 0;
+  private lastSettleAt = 0;
 
   constructor(instance: BetInstance) {
     this.instance = instance;
@@ -114,6 +118,7 @@ export class InstanceRunner {
     this.ticking = true;
     try {
       await this.ensureSession();
+      await this.maybeSettle();
 
       const day = await bus.getDayCounters(this.id);
       if (this.cfg.maxBetsPerDay != null && day.bets >= this.cfg.maxBetsPerDay) {
@@ -125,10 +130,17 @@ export class InstanceRunner {
         return;
       }
 
-      const { matched } = await readInstanceValuebets(this.instance.bookmakerSlug, this.cfg);
-      if (!matched.length) { await this.heartbeat('sem valuebet elegível'); return; }
+      const { matched, scanned } = await readInstanceValuebets(this.instance.bookmakerSlug, this.cfg);
+      if (!matched.length) {
+        await this.heartbeat('sem valuebet elegível');
+        await this.maybeDiag(scanned > 0
+          ? `${scanned} valuebet(s) da casa, nenhum passou os filtros (tiers/edge/odd/confiança)`
+          : 'nenhum valuebet da casa no momento');
+        return;
+      }
 
       const balance = this.bankrollId ? await getBankrollBalance(this.bankrollId) : 0;
+      let acted = 0;
 
       for (const vb of matched) {
         if (!this.running) break;
@@ -138,16 +150,63 @@ export class InstanceRunner {
         if (this.cfg.maxBetsPerDay != null && day.bets >= this.cfg.maxBetsPerDay) break;
 
         const st = computeStake(vb, this.cfg, { bankrollBalance: balance });
-        if (st.skip) continue;
+        if (st.skip) {
+          const nk = 'skip:' + key;
+          if (!this.dryLogged.has(nk)) {
+            this.dryLogged.add(nk);
+            await logInstanceEvent(this.instance, InstanceEventType.SKIP,
+              `pulado: ${st.reason} — ${vb.home} x ${vb.away} (${vb.selection})`,
+              { meta: { emissionId: vb.id, reason: st.reason, edgePct: vb.edgePct, balance } });
+          }
+          continue;
+        }
         if (this.cfg.maxStakePerDay != null && day.stake + st.stake > this.cfg.maxStakePerDay) continue;
 
         await this.tryPlace(vb, key, st.stake, day);
+        acted++;
       }
 
       await this.heartbeat();
+      if (acted === 0) await this.maybeDiag(`${matched.length} valuebet(s) elegível(is), mas 0 apostada(s) (dedupe/stake/limite) — saldo banca R$${balance.toFixed(2)}`);
     } finally {
       this.ticking = false;
     }
+  }
+
+  /**
+   * Auto-settle (Fase 5): a cada ~5min lê o histórico LIQUIDADO da casa e concilia
+   * as apostas DESTA instância (só source='instance' + houseBetId). Deriva o P&L do
+   * retorno realizado. Nunca toca apostas manuais.
+   */
+  private async maybeSettle(): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastSettleAt < 5 * 60 * 1000) return;
+    this.lastSettleAt = now;
+    try {
+      const hist = await this.client!.getHistory({ settled: true, days: 7 });
+      const map = new Map<string, SettleInfo>();
+      for (const b of hist) {
+        if (!b.settled || !b.betId) continue;
+        map.set(String(b.betId), resolveSettledOutcome(b.stakeAmount, b.returnAmount, b.oddValue));
+      }
+      if (!map.size) return;
+      const { settled, details } = await settleInstanceBets(this.id, map);
+      if (settled > 0) {
+        await logInstanceEvent(this.instance, InstanceEventType.SETTLE,
+          `${settled} aposta(s) conferida(s): ${details.slice(0, 6).join(', ')}`, { meta: { count: settled, details } });
+      }
+    } catch (e) {
+      await logInstanceEvent(this.instance, InstanceEventType.ERROR,
+        `falha ao conferir histórico: ${(e as Error).message}`, { level: 'warn' });
+    }
+  }
+
+  /** Evento de diagnóstico rate-limited (no máx. 1 a cada 2min) p/ o usuário entender o loop. */
+  private async maybeDiag(msg: string): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastDiagAt < 120_000) return;
+    this.lastDiagAt = now;
+    await logInstanceEvent(this.instance, InstanceEventType.STATE, msg, { level: 'info' });
   }
 
   private async tryPlace(vb: FlatValuebet, key: string, stake: number, day: bus.DayCounters): Promise<void> {

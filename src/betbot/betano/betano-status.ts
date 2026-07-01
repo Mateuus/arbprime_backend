@@ -34,3 +34,40 @@ export function isAutoSettleable(result: BetResult): boolean {
   if (!STATUS_MAP_VERIFIED) return false;
   return result === 'won' || result === 'lost' || result === 'void' || result === 'cashout';
 }
+
+/** Parseia dinheiro BRL da Betano ("R$1.234,56" → 1234.56, "R$0,50" → 0.5). */
+export function parseMoney(v: string | number | null | undefined): number {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+  if (!v) return 0;
+  const cleaned = String(v)
+    .replace(/[^\d,.-]/g, '')          // tira "R$", espaços
+    .replace(/\.(?=\d{3}(\D|$))/g, '') // tira ponto de milhar
+    .replace(',', '.');                // vírgula decimal → ponto
+  const n = parseFloat(cleaned);
+  return Number.isFinite(n) ? n : 0;
+}
+
+export interface SettledResult {
+  result: 'won' | 'lost' | 'void' | 'cashout';
+  grossReturn: number; // retorno bruto realizado (R$)
+  profit: number;      // P&L líquido = grossReturn − stake (exato, serve p/ todos os casos)
+}
+
+/**
+ * Resultado de uma aposta LIQUIDADA a partir do RETORNO realizado (robusto, não
+ * depende do Status int — que é ambíguo). Betano é back-only (sem comissão), então
+ * o P&L é exatamente `Return − Stake`. Verificado com dados reais: aposta anulada
+ * veio Return=Stake (Status 6). Ganho = Return≈Stake×odd; perda = Return≈0.
+ */
+export function resolveSettledOutcome(stake: number, grossReturn: number, odd: number): SettledResult {
+  const S = Math.max(0, stake);
+  const R = Math.max(0, grossReturn);
+  const fullWin = Math.round(S * odd * 100) / 100;
+  const eps = 0.02;
+  let result: SettledResult['result'];
+  if (R <= 0.005) result = 'lost';
+  else if (Math.abs(R - S) <= eps) result = 'void';
+  else if (Math.abs(R - fullWin) <= Math.max(eps, fullWin * 0.02)) result = 'won';
+  else result = 'cashout';
+  return { result, grossReturn: R, profit: Math.round((R - S) * 100) / 100 };
+}

@@ -1,4 +1,5 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
+import { Between, MoreThanOrEqual, LessThanOrEqual } from 'typeorm';
 import { AppDataSource } from '@Database';
 import { BetInstance, BetInstanceEvent } from '@Entities';
 import { createResponse } from '@utils';
@@ -233,9 +234,32 @@ export const listInstanceEvents = async (req: FastifyRequest, reply: FastifyRepl
   const { id } = req.params as { id: string };
   const inst = await instRepo().findOneBy({ id, userId });
   if (!inst) return reply.code(404).send(createResponse(0, 'Instância não encontrada.', null));
-  const limit = Math.min(200, Math.max(1, num((req.query as { limit?: string })?.limit, 50)));
-  const events = await evtRepo().find({ where: { instanceId: id, userId }, order: { createdAt: 'DESC' }, take: limit });
+
+  const q = (req.query || {}) as { limit?: string; from?: string; to?: string; type?: string };
+  const limit = Math.min(1000, Math.max(1, num(q.limit, 100)));
+  const where: Record<string, unknown> = { instanceId: id, userId };
+  if (q.type && q.type !== 'all') where.type = q.type;
+  const from = q.from ? new Date(q.from) : null;
+  const to = q.to ? new Date(q.to) : null;
+  const fromOk = from && !isNaN(from.getTime());
+  const toOk = to && !isNaN(to.getTime());
+  if (fromOk && toOk) where.createdAt = Between(from as Date, to as Date);
+  else if (fromOk) where.createdAt = MoreThanOrEqual(from as Date);
+  else if (toOk) where.createdAt = LessThanOrEqual(to as Date);
+
+  const events = await evtRepo().find({ where, order: { createdAt: 'DESC' }, take: limit });
   return reply.send(createResponse(1, 'Eventos carregados.', events));
+};
+
+/** Limpa o log (apaga os eventos) da instância. */
+export const clearInstanceEvents = async (req: FastifyRequest, reply: FastifyReply) => {
+  const userId = uid(req);
+  if (!userId) return reply.code(401).send(createResponse(0, 'Não autenticado.', []));
+  const { id } = req.params as { id: string };
+  const inst = await instRepo().findOneBy({ id, userId });
+  if (!inst) return reply.code(404).send(createResponse(0, 'Instância não encontrada.', null));
+  const res = await evtRepo().delete({ instanceId: id, userId });
+  return reply.send(createResponse(1, 'Log limpo.', { deleted: res.affected ?? 0 }));
 };
 
 // ===================== PROXIES (p/ a UI de config) =====================

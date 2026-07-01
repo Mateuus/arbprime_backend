@@ -14,7 +14,7 @@
 import { CycleSession, CycleSessionOpts } from '../cycle-session';
 import { Jar, Proxy, navHeaders, xhrHeaders, xhrGetHeaders } from '../http';
 import { BetanoError } from './errors';
-import { mapBetResult, BetResult } from './betano-status';
+import { BetResult, parseMoney, resolveSettledOutcome } from './betano-status';
 
 const SITE = 'https://www.betano.bet.br';
 
@@ -61,7 +61,11 @@ export interface HistoryBet {
   settled: boolean;
   status: number;
   result: BetResult;
+  stakeAmount: number;  // stake parseado (R$)
+  returnAmount: number; // retorno realizado parseado (R$) — campo Return
+  oddValue: number;     // odd decimal
   placedAt: string;
+  settledAt?: string;
   betslipInfoId?: string;
   selections: Array<{ id: string; title: string; game: string; market: string; odd: string; eventId: string; settled: boolean }>;
   raw?: unknown;
@@ -79,6 +83,9 @@ function normalizeBet(b: any): HistoryBet {
   );
   const settled = !!(b.Settled ?? b.settled);
   const status = Number(b.Status ?? b.status ?? 0);
+  const stakeAmount = parseMoney(b.Stake);
+  const returnAmount = parseMoney(b.Return ?? b.return);
+  const oddValue = Number(b.DecimalOdds ?? b.Odds ?? 0) || 0;
   return {
     betId: String(b.BetId ?? b.betId ?? b.id ?? ''),
     type: String(b.Accumulator ?? b.Type ?? ''),
@@ -87,8 +94,12 @@ function normalizeBet(b: any): HistoryBet {
     possibleWinnings: String(b.PossibleWinnings ?? ''),
     settled,
     status,
-    result: mapBetResult(settled, status),
+    result: settled ? resolveSettledOutcome(stakeAmount, returnAmount, oddValue).result : 'pending',
+    stakeAmount,
+    returnAmount,
+    oddValue,
     placedAt: String(b.PlacedAt ?? ''),
+    settledAt: b.SettledAt ? String(b.SettledAt) : undefined,
     betslipInfoId: b.BetslipInfoId != null ? String(b.BetslipInfoId) : undefined,
     selections: sels.map((s: any) => ({
       id: String(s.Id ?? ''),
