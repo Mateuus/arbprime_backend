@@ -56,6 +56,7 @@ function mergeConfig(partial: Partial<BetInstanceConfig> | undefined): BetInstan
     flatStake: p.flatStake != null ? Math.max(0, num(p.flatStake, 0)) : d.flatStake,
     minStake: Math.max(0, num(p.minStake, d.minStake)),
     maxStakePerBet: Math.max(0, num(p.maxStakePerBet, d.maxStakePerBet)),
+    stakeRounding: Math.max(0, num(p.stakeRounding, d.stakeRounding)),
     dedupeScope: (['perEmission', 'perEventSelection', 'perEvent'].includes(String(p.dedupeScope))
       ? p.dedupeScope : d.dedupeScope) as BetInstanceConfig['dedupeScope'],
     maxBetsPerEvent: Math.max(1, Math.floor(num(p.maxBetsPerEvent, d.maxBetsPerEvent))),

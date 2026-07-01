@@ -38,6 +38,14 @@ export function computeStake(vb: FlatValuebet, cfg: BetInstanceConfig, ctx: Stak
   if (stake > cfg.maxStakePerBet) stake = cfg.maxStakePerBet;
   if (ctx.realBalanceCap != null && stake > ctx.realBalanceCap) stake = Math.floor(ctx.realBalanceCap * 100) / 100;
 
+  // arredondamento opcional (ex.: múltiplos de R$1 pra betano) — nunca estoura o máx.
+  const inc = cfg.stakeRounding;
+  if (inc && inc > 0) {
+    stake = Math.round(stake / inc) * inc;
+    if (stake > cfg.maxStakePerBet) stake = Math.floor(cfg.maxStakePerBet / inc) * inc;
+    stake = Math.round(stake * 100) / 100;
+  }
+
   if (!(stake > 0)) return { stake: 0, skip: true, reason: 'stake calculado 0 (fração/banca/flat)' };
   if (stake < cfg.minStake) return { stake: 0, skip: true, reason: `stake ${stake.toFixed(2)} < mín ${cfg.minStake}` };
 

@@ -28,6 +28,7 @@ export interface BetInstanceConfig {
   flatStake: number | null;      // usado quando stakeMode = flat
   minStake: number;              // piso (respeita mínimo da casa)
   maxStakePerBet: number;
+  stakeRounding: number;         // arredonda o stake p/ múltiplo (0 = centavos; 1 = R$1; 0.5; 5…)
 
   // ---- dedupe ("não apostar 2x na mesma seleção/evento") ----
   dedupeScope: DedupeScope;
@@ -64,6 +65,7 @@ export const DEFAULT_INSTANCE_CONFIG: BetInstanceConfig = {
   flatStake: null,
   minStake: 2.0,
   maxStakePerBet: 20.0,
+  stakeRounding: 0,
   dedupeScope: DedupeScope.PER_EVENT,
   maxBetsPerEvent: 1,
   maxBetsPerDay: 50,
