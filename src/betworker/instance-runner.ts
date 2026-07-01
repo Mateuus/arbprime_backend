@@ -142,14 +142,15 @@ export class InstanceRunner {
       const balance = this.bankrollId ? await getBankrollBalance(this.bankrollId) : 0;
       let acted = 0;
       let dedupeSkips = 0;
-      let capSkips = 0;
+      let eventCapSkips = 0;
+      let dailyCapSkips = 0;
       let stakeSkips = 0;
 
       for (const vb of matched) {
         if (!this.running) break;
         const key = dedupeKey(this.cfg.dedupeScope, vb);
         if (this.placed.has(key) || (await bus.isPlaced(this.id, key))) { dedupeSkips++; continue; }
-        if ((await bus.getEventCount(this.id, vb.eventId)) >= this.cfg.maxBetsPerEvent) { capSkips++; continue; }
+        if ((await bus.getEventCount(this.id, vb.eventId)) >= this.cfg.maxBetsPerEvent) { eventCapSkips++; continue; }
         if (this.cfg.maxBetsPerDay != null && day.bets >= this.cfg.maxBetsPerDay) break;
 
         const st = computeStake(vb, this.cfg, { bankrollBalance: balance });
@@ -164,7 +165,7 @@ export class InstanceRunner {
           }
           continue;
         }
-        if (this.cfg.maxStakePerDay != null && day.stake + st.stake > this.cfg.maxStakePerDay) { capSkips++; continue; }
+        if (this.cfg.maxStakePerDay != null && day.stake + st.stake > this.cfg.maxStakePerDay) { dailyCapSkips++; continue; }
 
         await this.tryPlace(vb, key, st.stake, day);
         acted++;
@@ -173,7 +174,7 @@ export class InstanceRunner {
       await this.heartbeat();
       if (acted === 0) {
         await this.maybeDiag(
-          `${matched.length} elegível(is), 0 nova(s): ${dedupeSkips} já apostada(s) (dedupe), ${stakeSkips} por stake, ${capSkips} por limite — saldo banca R$${balance.toFixed(2)}`,
+          `${matched.length} elegível(is), 0 nova(s): ${dedupeSkips} já apostada(s) (dedupe), ${stakeSkips} por stake, ${eventCapSkips} por limite de apostas/evento, ${dailyCapSkips} por limite diário — banca R$${balance.toFixed(2)}`,
         );
       }
     } finally {
