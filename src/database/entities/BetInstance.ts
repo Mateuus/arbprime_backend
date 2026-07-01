@@ -42,6 +42,7 @@ export interface BetInstanceConfig {
   // ---- operação ----
   pollIntervalSec: number;       // intervalo do loop (ex.: 20s)
   dryRun: boolean;               // simula (não efetiva o place)
+  maxEventDays: number | null;   // só apostar jogos que começam em até X dias (null = sem limite)
 
   // ---- resiliência ----
   restartPolicy: RestartPolicy;
@@ -73,6 +74,7 @@ export const DEFAULT_INSTANCE_CONFIG: BetInstanceConfig = {
   stopLossDay: 100.0,
   pollIntervalSec: 20,
   dryRun: true,
+  maxEventDays: null,
   restartPolicy: RestartPolicy.ON_FAILURE,
   maxRetries: 5,
   proxyId: null,

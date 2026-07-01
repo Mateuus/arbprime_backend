@@ -49,6 +49,15 @@ function gateReason(vb: FlatValuebet, cfg: BetInstanceConfig): string | null {
   if (vb.confidence < cfg.confidenceMin) return `conf ${vb.confidence} < ${cfg.confidenceMin}`;
   if (cfg.markets && cfg.markets.length > 0 && !cfg.markets.includes(vb.market)) return `mercado ${vb.market} não permitido`;
   if (cfg.leagues && cfg.leagues.length > 0 && !cfg.leagues.includes(vb.league)) return `liga "${vb.league}" não permitida`;
+  // Janela de dias: só apostar jogos que começam em até X dias (vb.date é GMT-3
+  // tagueado Z, ~3h de desvio — irrelevante p/ granularidade de dias).
+  if (cfg.maxEventDays != null && cfg.maxEventDays > 0) {
+    const t = new Date(vb.date).getTime();
+    if (Number.isFinite(t)) {
+      const daysAhead = (t - Date.now()) / 86_400_000;
+      if (daysAhead > cfg.maxEventDays) return `jogo em ${daysAhead.toFixed(1)}d > máx ${cfg.maxEventDays}d`;
+    }
+  }
   return null;
 }
 

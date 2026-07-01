@@ -65,6 +65,7 @@ function mergeConfig(partial: Partial<BetInstanceConfig> | undefined): BetInstan
     stopLossDay: capFloat(p.stopLossDay, d.stopLossDay),
     pollIntervalSec: Math.max(5, Math.floor(num(p.pollIntervalSec, d.pollIntervalSec))),
     dryRun: p.dryRun != null ? !!p.dryRun : d.dryRun,
+    maxEventDays: capFloat(p.maxEventDays, d.maxEventDays),
     restartPolicy: (['always', 'on-failure', 'never'].includes(String(p.restartPolicy))
       ? p.restartPolicy : d.restartPolicy) as BetInstanceConfig['restartPolicy'],
     maxRetries: Math.max(0, Math.floor(num(p.maxRetries, d.maxRetries))),
