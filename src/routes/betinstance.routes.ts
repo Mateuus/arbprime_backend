@@ -1,7 +1,8 @@
 import { FastifyInstance } from "fastify";
 import {
   listInstances, getInstance, createInstance, updateInstance, deleteInstance,
-  startInstance, pauseInstance, stopInstance, testLogin, listInstanceEvents, listInstanceProxies,
+  startInstance, pauseInstance, stopInstance, testLogin, listInstanceEvents,
+  listInstanceProxies, checkInstanceProxies,
 } from "@Controllers";
 import { checkAuth } from "../middlewares/auth.middleware";
 
@@ -16,6 +17,7 @@ export default async function betInstanceRoutes(app: FastifyInstance) {
   app.get("/", auth, listInstances);
   app.post("/", auth, createInstance);
   app.get("/proxies", auth, listInstanceProxies);
+  app.post("/proxies/check", auth, checkInstanceProxies);
   app.post("/test-login", auth, testLogin);
   app.get("/:id", auth, getInstance);
   app.put("/:id", auth, updateInstance);

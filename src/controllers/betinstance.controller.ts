@@ -10,6 +10,7 @@ import { encryptSecret, decryptSecret, isEncryptionConfigured } from '../utils/c
 import { publishCommand } from '../betworker/bus';
 import { serializeInstance, getUserInstancesStatus } from '../services/betinstance/betinstance.service';
 import { BetanoClient } from '../betbot/betano/betano-client';
+import { checkBetanoProxy } from '../betbot/betano/proxy-check';
 import { loadProxyById, loadProxyList } from '../betbot/proxy-list';
 
 const instRepo = () => AppDataSource.getRepository(BetInstance);
@@ -248,4 +249,35 @@ export const listInstanceProxies = async (_req: FastifyRequest, reply: FastifyRe
   } catch (e) {
     return reply.code(500).send(createResponse(0, 'Erro ao carregar proxies.', { error: (e as Error).message }));
   }
+};
+
+/**
+ * Verifica TODOS os proxis habilitados p/ a Betano (vivo + Cloudflare + DataDome)
+ * usando o checkBetanoProxy — p/ o usuário escolher um que FUNCIONA. Com creds,
+ * testa o login (o gate real do DataDome); sem creds, só liveness+Cloudflare.
+ * Roda com concorrência limitada (4) p/ não abrir Go demais. Ordena funcionais
+ * primeiro, por latência.
+ */
+export const checkInstanceProxies = async (req: FastifyRequest, reply: FastifyReply) => {
+  const userId = uid(req);
+  if (!userId) return reply.code(401).send(createResponse(0, 'Não autenticado.', []));
+  const b = (req.body || {}) as { username?: string; password?: string; withLogin?: boolean };
+  const withLogin = b.withLogin !== false && !!(b.username && b.password);
+
+  const proxies = await loadProxyList({ onlyEnabled: true });
+  const results: Array<{ id: string; ip: string; port: string; iptype: string; functional: boolean; reason: string; latencyMs: number; dataDomeOk: boolean | null }> = [];
+  const queue = [...proxies];
+  const worker = async () => {
+    for (let p = queue.shift(); p; p = queue.shift()) {
+      try {
+        const r = await checkBetanoProxy(p, { withLogin, username: b.username, password: b.password, timeoutSec: 20 });
+        results.push({ id: p.id, ip: p.ip, port: p.port, iptype: p.iptype, functional: r.functional, reason: r.reason, latencyMs: r.latencyMs, dataDomeOk: r.dataDomeOk });
+      } catch (e) {
+        results.push({ id: p.id, ip: p.ip, port: p.port, iptype: p.iptype, functional: false, reason: (e as Error).message, latencyMs: 0, dataDomeOk: null });
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, proxies.length || 1) }, worker));
+  results.sort((a, c) => (Number(c.functional) - Number(a.functional)) || (a.latencyMs - c.latencyMs));
+  return reply.send(createResponse(1, `Proxies verificados (${withLogin ? 'com login' : 'liveness'}).`, results));
 };
