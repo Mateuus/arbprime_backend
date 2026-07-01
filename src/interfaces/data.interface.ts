@@ -99,6 +99,7 @@ export interface ValuebetEmission {
     rawSelection?: string; // nome da seleção como a casa mostra
     bookmaker: string;     // casa ONDE apostar (betano/bet365/superbet)
     eventId: string;       // id do evento na casa
+    selectionId?: string;  // ID da seleção NA CASA (betano selection.id) — o que o betslip/aposta precisa; só casas instrumentadas (hoje betano)
     refEventId?: string;   // INTERNO (âncora do CLV) — não exibir
     handicap?: string;     // linha (over/under); "" quando não se aplica
     link?: string;         // deep link p/ apostar

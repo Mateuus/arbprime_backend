@@ -21,3 +21,4 @@ export * from './middles.controller';
 export * from './affiliate.controller';
 export * from './affiliateAdmin.controller';
 export * from './status.controller';
+export * from './betinstance.controller';

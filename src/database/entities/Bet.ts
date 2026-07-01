@@ -17,6 +17,10 @@ import { BetType, BetStatus } from '../../enums/analytix.enum';
 @Entity('analytix_bets')
 @Index('idx_bet_user', ['userId'])
 @Index('idx_bet_user_status', ['userId', 'status'])
+// Idempotência da "Instância de Bet": no máx. 1 aposta por (instância, emissão de
+// valuebet). NULLs (apostas manuais/calculadora) não colidem no MySQL. É o backstop
+// duro do dedupe — o insert duplicado falha e a aposta é pulada.
+@Index('uq_bet_instance_emission', ['instanceId', 'emissionId'], { unique: true })
 export class Bet {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -63,6 +67,13 @@ export class Bet {
   @Column({ type: 'varchar', length: 220, nullable: true })
   surebetKey!: string | null; // ligação/dedupe com a surebet original
 
+  // ---- origem "Instância de Bet" (null p/ apostas manuais/calculadora) ----
+  @Column({ type: 'varchar', nullable: true })
+  instanceId!: string | null; // BetInstance.id que criou a aposta
+
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  emissionId!: string | null; // vb.id (== valuebet_emissions.emission_id) — chave de idempotência
+
   // ---- snapshot da surebet no momento do lançamento ----
   @Column({ type: 'decimal', precision: 14, scale: 2, default: 0 })
   totalStake!: string;
@@ -83,7 +94,7 @@ export class Bet {
   notes!: string | null;
 
   @Column({ type: 'varchar', length: 40, default: 'calculator' })
-  source!: string; // 'calculator' | 'manual'
+  source!: string; // 'calculator' | 'manual' | 'instance' (BET_SOURCE_INSTANCE)
 
   @Column({ type: 'boolean', default: false })
   hidden!: boolean;

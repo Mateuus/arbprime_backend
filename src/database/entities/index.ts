@@ -24,3 +24,5 @@ export { Coupon } from './Coupon';
 export { CouponRedemption } from './CouponRedemption';
 export { AffiliateCommission } from './AffiliateCommission';
 export { AffiliatePayout } from './AffiliatePayout';
+export { BetInstance } from './BetInstance';
+export { BetInstanceEvent } from './BetInstanceEvent';

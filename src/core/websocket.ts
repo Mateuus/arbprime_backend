@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import { logger, LoggerClass } from "@Core/logger";
 import { getFormattedSurebets, getFormattedValuebets, getFormattedMiddles, getArbitragePairs, calculateArbitrage } from "@utils/functions";
 import { UserData } from "@Interfaces";
+import { getUserInstancesStatus } from "../services/betinstance/betinstance.service";
 
 dotenv.config();
 
@@ -41,7 +42,11 @@ async function handleSingleRequest(ws: WebSocket, method: string, options: Recor
     if (method === 'monitor_pairs') {
       data = await calculateArbitrage(options, user);
     }
-  
+
+    if (method === "bet_instances") {
+      data = user?.id ? await getUserInstancesStatus(user.id) : [];
+    }
+
     if (data) {
       ws.send(JSON.stringify({ success: true, method, data }));
     } else {
@@ -55,6 +60,17 @@ async function handleAutoBroadcast(method: string) {
   );
 
   if (relevantClients.length === 0) return;
+
+  // Métodos POR-USUÁRIO: o dado depende de meta.user, então NÃO pode agrupar por
+  // type (senão usuários diferentes veriam o status um do outro). Envia 1 a 1.
+  if (method === 'bet_instances') {
+    for (const [client, meta] of relevantClients) {
+      if (client.readyState !== WebSocket.OPEN) continue;
+      const data = meta.user?.id ? await getUserInstancesStatus(meta.user.id) : [];
+      client.send(JSON.stringify({ success: true, method, data }));
+    }
+    return;
+  }
 
   // Agrupa clientes por type, mas mantém o último options para aquele grupo
   const grouped = new Map<string, { clients: WebSocket[], options: Record<string, unknown>, user: UserData | null }>();
@@ -181,6 +197,7 @@ export function startWebSocketServer() {
     setInterval(() => handleAutoBroadcast("arbitrage_betting"), 5000);
     setInterval(() => handleAutoBroadcast("valuebet"), 5000);
     setInterval(() => handleAutoBroadcast("middles"), 5000);
+    setInterval(() => handleAutoBroadcast("bet_instances"), 5000);
     setInterval(() => handleAutoBroadcast("arbitrage_pairs"), 1000);
     setInterval(() => handleAutoBroadcast("monitor_pairs"), 1000);
 }

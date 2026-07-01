@@ -16,5 +16,23 @@ module.exports = {
         REDIS_PORT: 6379,
       },
     },
+    {
+      // Bet Worker — processo SEPARADO da API/WS (isola memória/crash + o binário Go
+      // do cycletls). Roda os daemons das Instâncias de Bet. Requer INSTANCE_ENC_KEY
+      // no .env do servidor (senão não decifra as credenciais das casas).
+      name: "arbprime_betworker",
+      script: "dist/betworker/index.js",
+      node_args: "-r module-alias/register",
+      exec_mode: "fork",
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: "1G",
+      env: {
+        NODE_ENV: "production",
+        REDIS_HOST: "192.168.5.210",
+        REDIS_PORT: 6379,
+      },
+    },
   ],
 };

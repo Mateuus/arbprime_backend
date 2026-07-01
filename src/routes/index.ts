@@ -24,6 +24,7 @@ import couponsRoutes from "./coupons.routes";
 import adminAffiliateRoutes from "./adminAffiliate.routes";
 import adminCouponsRoutes from "./adminCoupons.routes";
 import statusRoutes from "./status.routes";
+import betInstanceRoutes from "./betinstance.routes";
 
 export default async function routes(app: FastifyInstance) {
   app.register(homeRoutes);
@@ -51,4 +52,5 @@ export default async function routes(app: FastifyInstance) {
   app.register(adminAffiliateRoutes, { prefix: "/admin/affiliates" });
   app.register(adminCouponsRoutes, { prefix: "/admin/coupons" });
   app.register(statusRoutes, { prefix: "/status" });
+  app.register(betInstanceRoutes, { prefix: "/instances" });
 }

@@ -34,6 +34,16 @@ export class BetLeg {
   @Column({ type: 'varchar', length: 120, nullable: true })
   houseEventId!: string | null; // SurebetOdd.eventId (id do evento NA CASA)
 
+  // ID da APOSTA na casa (betano place → receipts[0].betId). Elo p/ conferir o
+  // resultado no histórico da casa (auto-settle da Instância de Bet). Null p/
+  // apostas não colocadas via instância.
+  @Column({ type: 'varchar', length: 80, nullable: true })
+  houseBetId!: string | null;
+
+  // ID da SELEÇÃO na casa (betano selection.id) — o que o betslip usou p/ apostar.
+  @Column({ type: 'varchar', length: 80, nullable: true })
+  houseSelectionId!: string | null;
+
   @Column({ type: 'varchar', length: 120, nullable: true })
   market!: string | null; // mercado canônico (leg.market)
 
