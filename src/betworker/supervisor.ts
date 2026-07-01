@@ -91,6 +91,10 @@ export class Supervisor {
         if (existing) { await existing.stop(InstanceStatus.STOPPED).catch(() => {}); this.runners.delete(inst.id); }
         await this.launch(inst);
         break;
+      case 'renew':
+        // Renovação manual de sessão: só faz sentido numa instância viva.
+        if (existing) existing.forceRelogin();
+        break;
     }
   }
 

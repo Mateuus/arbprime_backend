@@ -18,7 +18,7 @@ const BASE = 'ArbPrime:BetInstance';
 export const CMD_CHANNEL = `${BASE}:Commands`;
 export const STATUS_CHANNEL = `${BASE}:Status`;
 
-export type InstanceCommand = { type: 'start' | 'pause' | 'stop' | 'reload'; instanceId: string };
+export type InstanceCommand = { type: 'start' | 'pause' | 'stop' | 'reload' | 'renew'; instanceId: string };
 export interface StatusMessage {
   instanceId: string;
   userId: string;
@@ -29,6 +29,7 @@ export interface StatusMessage {
 
 const kHb = (id: string) => `${BASE}:${id}:hb`;
 const kSession = (id: string) => `${BASE}:${id}:session`;
+const kBalance = (id: string) => `${BASE}:${id}:balance`;
 const kPlaced = (id: string) => `${BASE}:${id}:placed`;
 const kLock = (id: string, key: string) => `${BASE}:${id}:lock:${key}`;
 const kDay = (id: string, day: string) => `${BASE}:${id}:day:${day}`;
@@ -58,7 +59,8 @@ export async function getHeartbeat(instanceId: string): Promise<{ ts: number } &
 }
 
 // ---- sessão cifrada ----
-export async function saveSession(instanceId: string, session: BetanoSessionState, ttlSec = 6 * 3600): Promise<void> {
+// TTL de 23h: a Betano derruba a sessão em ~23h; o blob some sozinho perto disso.
+export async function saveSession(instanceId: string, session: BetanoSessionState, ttlSec = 23 * 3600): Promise<void> {
   if (!isEncryptionConfigured()) throw new Error('INSTANCE_ENC_KEY ausente — não posso persistir sessão cifrada');
   const blob = encryptSecret(JSON.stringify(session));
   await getRedisClient().set(kSession(instanceId), blob, 'EX', ttlSec);
@@ -70,6 +72,20 @@ export async function loadSession(instanceId: string): Promise<BetanoSessionStat
 }
 export async function clearSession(instanceId: string): Promise<void> {
   await getRedisClient().del(kSession(instanceId));
+}
+
+// ---- saldo real da casa (cache p/ a UI ler sem bater na casa a cada request) ----
+export interface CachedBalance {
+  cash: number; betting: number; bonus: number; total: number;
+  openBetsCount: number; openBetsBalance: number; currency: string; symbol: string; fetchedAt: number;
+}
+export async function setBalance(instanceId: string, bal: CachedBalance, ttlSec = 10 * 60): Promise<void> {
+  await getRedisClient().set(kBalance(instanceId), JSON.stringify(bal), 'EX', Math.max(30, ttlSec));
+}
+export async function getBalanceCache(instanceId: string): Promise<CachedBalance | null> {
+  const raw = await getRedisClient().get(kBalance(instanceId));
+  if (!raw) return null;
+  try { return JSON.parse(raw) as CachedBalance; } catch { return null; }
 }
 
 // ---- dedupe (SET + lock in-flight) ----

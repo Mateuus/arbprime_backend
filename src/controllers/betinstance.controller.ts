@@ -8,7 +8,7 @@ import {
 } from '../database/entities/BetInstance';
 import { DesiredState, InstanceStatus } from '../enums/bet-instance.enum';
 import { encryptSecret, decryptSecret, isEncryptionConfigured } from '../utils/crypto';
-import { publishCommand } from '../betworker/bus';
+import { publishCommand, clearSession, getBalanceCache, setBalance, loadSession } from '../betworker/bus';
 import { serializeInstance, getUserInstancesStatus } from '../services/betinstance/betinstance.service';
 import { BetanoClient } from '../betbot/betano/betano-client';
 import { checkBetanoProxy } from '../betbot/betano/proxy-check';
@@ -241,6 +241,70 @@ export const testLogin = async (req: FastifyRequest, reply: FastifyReply) => {
   } finally {
     await client.close().catch(() => {});
   }
+};
+
+// ===================== SALDO / SESSÃO =====================
+
+/** Janela de vida da sessão antes da casa derrubar (~23h); relogamos aos 22h. */
+const SESSION_MAX_AGE_MS = 22 * 3600 * 1000;
+
+/**
+ * Saldo real da casa + idade da sessão. Por padrão devolve o que o worker cacheou
+ * no Redis (atualizado a cada ~45s). Com `?live=1` faz uma leitura ao vivo REUSANDO
+ * a sessão salva (sem re-login) — p/ o botão "Atualizar saldo".
+ */
+export const getInstanceBalance = async (req: FastifyRequest, reply: FastifyReply) => {
+  const userId = uid(req);
+  if (!userId) return reply.code(401).send(createResponse(0, 'Não autenticado.', []));
+  const { id } = req.params as { id: string };
+  const inst = await instRepo().findOneBy({ id, userId });
+  if (!inst) return reply.code(404).send(createResponse(0, 'Instância não encontrada.', null));
+
+  const live = String((req.query as { live?: string })?.live || '') === '1';
+  const saved = await loadSession(id);
+  let balance = await getBalanceCache(id);
+  let liveOk = false;
+  let liveError: string | null = null;
+
+  if (live && saved) {
+    const proxy = inst.config?.proxyId ? await loadProxyById(inst.config.proxyId) : null;
+    const client = new BetanoClient({ proxy, timeoutSec: 25 });
+    try {
+      client.importSession(saved);
+      const b = await client.getBalance();
+      balance = b; liveOk = true;
+      await setBalance(id, b);
+    } catch (e) {
+      liveError = (e as { kind?: string }).kind || (e as Error).message;
+    } finally {
+      await client.close().catch(() => {});
+    }
+  }
+
+  const loggedAtMs = saved?.loggedAt ? Date.parse(saved.loggedAt) : NaN;
+  const session = Number.isFinite(loggedAtMs)
+    ? { loggedAt: saved!.loggedAt, ageMs: Date.now() - loggedAtMs, maxAgeMs: SESSION_MAX_AGE_MS, customerId: saved!.customerId }
+    : null;
+
+  return reply.send(createResponse(1, 'Saldo carregado.', {
+    balance, session, live: liveOk, liveError,
+    hasSession: !!saved,
+  }));
+};
+
+/**
+ * Renovação manual de sessão: apaga o blob persistido e manda o runner vivo relogar
+ * no próximo ciclo (botão "Renovar sessão"). Útil se a casa derrubou antes das 23h.
+ */
+export const renewInstanceSession = async (req: FastifyRequest, reply: FastifyReply) => {
+  const userId = uid(req);
+  if (!userId) return reply.code(401).send(createResponse(0, 'Não autenticado.', []));
+  const { id } = req.params as { id: string };
+  const inst = await instRepo().findOneBy({ id, userId });
+  if (!inst) return reply.code(404).send(createResponse(0, 'Instância não encontrada.', null));
+  await clearSession(id);
+  await publishCommand({ type: 'renew', instanceId: id });
+  return reply.send(createResponse(1, 'Renovação solicitada — a sessão será refeita no próximo ciclo.', { id }));
 };
 
 // ===================== EVENTOS (log ao vivo) =====================

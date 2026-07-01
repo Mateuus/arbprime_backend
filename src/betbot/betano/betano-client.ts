@@ -27,6 +27,19 @@ export interface BetanoSessionState {
   loggedAt: string;
 }
 
+/** Saldo real da conta na casa (parseado de /api/balance → data.balances[0]). */
+export interface BetanoBalance {
+  cash: number;             // cashBalance — o que dá p/ apostar de fato
+  betting: number;          // bettingBalance
+  bonus: number;            // unlockedBonusBalance
+  total: number;            // totalDisplayBalance
+  openBetsCount: number;    // nº de apostas abertas
+  openBetsBalance: number;  // R$ preso em apostas abertas
+  currency: string;         // 'BRL'
+  symbol: string;           // 'R$'
+  fetchedAt: number;        // epoch ms da leitura
+}
+
 export interface PlaceParams {
   selectionId: string;
   eventId: string;
@@ -226,6 +239,31 @@ export class BetanoClient {
   }
 
   /**
+   * Saldo real da conta (`GET /api/balance` → `data.balances[0]`, campos numéricos).
+   * É a fonte de verdade p/ saber se dá p/ apostar — a banca do Analytix é derivada
+   * e pode divergir do dinheiro que está de fato na casa.
+   */
+  async getBalance(): Promise<BetanoBalance> {
+    const url = `${SITE}/api/balance?_=${Date.now()}`;
+    const r = await this.session.request('get', url, { headers: xhrGetHeaders(`${SITE}/myaccount/overview`) });
+    if (r.status === 429) throw new BetanoError('rate_limited', `balance 429 (proxy/casa limitando)`);
+    if (r.status === 401 || r.status === 403) throw new BetanoError('auth', `balance não autenticado (${r.status})`);
+    const b = r.json?.data?.balances?.[0];
+    if (!b) throw new BetanoError('auth', `balance sem dados (status ${r.status}) — sessão inválida?`);
+    return {
+      cash: Number(b.cashBalance) || 0,
+      betting: Number(b.bettingBalance) || 0,
+      bonus: Number(b.unlockedBonusBalance) || 0,
+      total: Number(b.totalDisplayBalance) || 0,
+      openBetsCount: Number(b.openBetsCount) || 0,
+      openBetsBalance: Number(b.openBetsBalance) || 0,
+      currency: String(b.currencyCode || 'BRL'),
+      symbol: String(b.currencySymbol || 'R$'),
+      fetchedAt: Date.now(),
+    };
+  }
+
+  /**
    * Aposta simples numa seleção. Encadeia plain-leg → updatebets(PATCH) → place,
    * repassando o HASH que regenera a cada passo (usar o hash do plain-leg no place
    * → PlacementHashInvalid). Guarda de odd mínima e teto de stake. `dryRun` para
@@ -248,6 +286,7 @@ export class BetanoClient {
       triggerPoint: { origin: null, parentOrigin: null },
     });
     const pl = await this.session.request('post', `${SITE}/api/betslip/v3/plain-leg/`, { body: plainLegBody, headers: HO });
+    if (pl.status === 429) throw new BetanoError('rate_limited', `plain-leg 429 (proxy/casa limitando)`);
     if (pl.status === 401 || pl.status === 403) throw new BetanoError('auth', `plain-leg não autenticado (${pl.status})`);
     const bs = pl.json?.data;
     const bet0 = bs?.bets?.[0];
@@ -269,8 +308,18 @@ export class BetanoClient {
       bets: [{ ...bet0, amount }],
     });
     const upd = await this.session.request('patch', `${SITE}/api/betslip/v3/updatebets`, { body: updBody, headers: HO });
+    if (upd.status === 429) throw new BetanoError('rate_limited', `updatebets 429 (proxy/casa limitando)`);
+    if (upd.status === 401 || upd.status === 403) throw new BetanoError('auth', `updatebets não autenticado (${upd.status})`);
     const ud = upd.json?.data || upd.json || {};
-    const newHash = ud.hash || ud.betslip?.hash || bs.hash;
+    // O `place` EXIGE o hash NOVO devolvido pelo updatebets. Se ele não veio (429/HTML/
+    // erro), NÃO cair no hash velho do plain-leg — isso vira PlacementHashInvalid (422)
+    // no place. Melhor abortar aqui com erro claro e deixar o próximo tick retentar.
+    const newHash = ud.hash || ud.betslip?.hash;
+    if (!newHash) {
+      throw new BetanoError('update', `updatebets sem hash novo (status=${upd.status}) — abortando p/ não cair em 422`, {
+        status: upd.status, body: upd.body.slice(0, 160),
+      });
+    }
     const newSlip = ud.slipData || ud.betslip?.slipData || bs.slipData;
     const newBets = ud.bets || ud.betslip?.bets || [{ ...bet0, amount }];
     const newLegs = ud.legs || ud.betslip?.legs || bs.legs;
@@ -299,6 +348,7 @@ export class BetanoClient {
 
     // 3) place — EFETIVA (gasta)
     const pr = await this.session.request('post', `${SITE}/api/betslip/v3/place`, { body: placeBody, headers: HO });
+    if (pr.status === 429) throw new BetanoError('rate_limited', `place 429 (proxy/casa limitando)`);
     if (pr.status === 401 || pr.status === 403) throw new BetanoError('auth', `place não autenticado (${pr.status})`);
     if (/geocomply|verifique sua localiza|location/i.test(pr.body)) {
       throw new BetanoError('geocomply', 'place barrado por localização (GeoComply)');

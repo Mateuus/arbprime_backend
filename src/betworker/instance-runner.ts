@@ -10,7 +10,7 @@
 import { BetInstance, BetInstanceConfig } from '../database/entities/BetInstance';
 import { AppDataSource } from '../database/data-source';
 import { InstanceStatus, InstanceEventType } from '../enums/bet-instance.enum';
-import { BetanoClient, BetanoCredentials } from '../betbot/betano/betano-client';
+import { BetanoClient, BetanoCredentials, BetanoBalance } from '../betbot/betano/betano-client';
 import { BetanoError } from '../betbot/betano/errors';
 import { resolveSettledOutcome } from '../betbot/betano/betano-status';
 import { loadProxyById } from '../betbot/proxy-list';
@@ -24,6 +24,14 @@ import {
   recordInstanceBet, logInstanceEvent, resolveInstanceBankroll, getBankrollBalance,
   settleInstanceBets, SettleInfo,
 } from '../services/betinstance/betinstance.service';
+
+/** A Betano derruba a sessão em ~23h; relogamos proativamente aos 22h p/ não pegar
+ *  a janela de sessão morta (place falharia com auth). */
+const SESSION_MAX_AGE_MS = 22 * 3600 * 1000;
+/** Recuo após um 429 (proxy/casa limitando) — não martelar. */
+const RATE_LIMIT_BACKOFF_MS = 30_000;
+/** Saldo real é caro (bate na casa) — cacheia por instância. */
+const BALANCE_TTL_MS = 45_000;
 
 export class InstanceRunner {
   private instance: BetInstance;
@@ -39,6 +47,11 @@ export class InstanceRunner {
   private timer: NodeJS.Timeout | null = null;
   private lastDiagAt = 0;
   private lastSettleAt = 0;
+  private balance: BetanoBalance | null = null;  // saldo real da casa (último lido)
+  private lastBalanceAt = 0;
+  private loggedAt = 0;                     // epoch ms do login atual (cap de 22h)
+  private backoffUntil = 0;                 // recuo após 429
+  private lowBalanceLogged = false;         // não spammar "sem saldo" a cada tick
 
   constructor(instance: BetInstance) {
     this.instance = instance;
@@ -46,6 +59,12 @@ export class InstanceRunner {
   }
 
   get id(): string { return this.instance.id; }
+
+  /** Renovação manual de sessão (botão "Renovar sessão"): relogar no próximo ciclo. */
+  forceRelogin(): void {
+    this.needRelogin = true;
+    this.backoffUntil = 0;
+  }
 
   async start(): Promise<void> {
     if (this.running) return;
@@ -102,23 +121,66 @@ export class InstanceRunner {
     if (!this.client) {
       this.client = new BetanoClient({ proxy: this.proxy, timeoutSec: 30 });
       const saved = await bus.loadSession(this.id);
-      if (saved) this.client.importSession(saved);
+      if (saved) {
+        this.client.importSession(saved);
+        this.loggedAt = Date.parse(saved.loggedAt) || 0;
+      }
     }
-    if (!this.needRelogin && (await this.client.isSessionValid())) return;
+    // Cap de idade: relogar antes das 23h da Betano (evita a janela de sessão morta).
+    const aged = this.loggedAt > 0 && Date.now() - this.loggedAt > SESSION_MAX_AGE_MS;
+    if (!this.needRelogin && !aged && (await this.client.isSessionValid())) return;
+    if (aged) {
+      await logInstanceEvent(this.instance, InstanceEventType.SESSION,
+        `sessão com ${((Date.now() - this.loggedAt) / 3600000).toFixed(1)}h — renovando antes do limite da casa (23h)`, { level: 'info' });
+    }
 
     const creds = this.decryptCreds();
     const s = await this.client.login(creds);
     await bus.saveSession(this.id, s);
+    this.loggedAt = Date.parse(s.loggedAt) || Date.now();
     this.needRelogin = false;
+    this.balance = null; this.lastBalanceAt = 0; // força re-leitura do saldo pós-login
     await logInstanceEvent(this.instance, InstanceEventType.LOGIN, 'login/re-login OK', { meta: { customerId: s.customerId } });
+  }
+
+  /** Lê o saldo real da casa (cacheado). Escreve no Redis p/ a UI. Não apostar sem isto. */
+  private async refreshBalance(force = false): Promise<void> {
+    const now = Date.now();
+    if (!force && this.balance && now - this.lastBalanceAt < BALANCE_TTL_MS) return;
+    const b = await this.client!.getBalance(); // pode lançar auth/rate_limited → tratado no tick
+    this.balance = b;
+    this.lastBalanceAt = now;
+    await bus.setBalance(this.id, b);
   }
 
   private async tick(): Promise<void> {
     if (this.ticking || !this.running) return;
+    // Recuo pós-429: não bater na casa/proxy até esfriar.
+    if (Date.now() < this.backoffUntil) {
+      await this.heartbeat(`recuando do 429 (${Math.ceil((this.backoffUntil - Date.now()) / 1000)}s)`);
+      return;
+    }
     this.ticking = true;
     try {
       await this.ensureSession();
+      await this.refreshBalance();
       await this.maybeSettle();
+
+      // GATE DE SALDO REAL (só AO VIVO): sem dinheiro na casa, NÃO tentar apostar
+      // (senão fica martelando plain-leg/place → 429 → 422). Espera recarregar. Em
+      // DRY-RUN o loop segue (preview de estratégia não gasta e o usuário quer ver).
+      const minNeeded = Math.max(this.cfg.minStake, 0.01);
+      if (!this.cfg.dryRun && this.balance && this.balance.cash < minNeeded) {
+        await this.heartbeat(`saldo insuficiente: ${this.balance.symbol}${this.balance.cash.toFixed(2)}`);
+        if (!this.lowBalanceLogged) {
+          this.lowBalanceLogged = true;
+          await logInstanceEvent(this.instance, InstanceEventType.STATE,
+            `saldo real ${this.balance.symbol}${this.balance.cash.toFixed(2)} < stake mínimo R$${this.cfg.minStake.toFixed(2)} — apostas pausadas até recarregar (evita 429/422 por martelada)`,
+            { level: 'warn', meta: { cash: this.balance.cash, minStake: this.cfg.minStake } });
+        }
+        return;
+      }
+      this.lowBalanceLogged = false;
 
       const day = await bus.getDayCounters(this.id);
       if (this.cfg.maxBetsPerDay != null && day.bets >= this.cfg.maxBetsPerDay) {
@@ -153,7 +215,8 @@ export class InstanceRunner {
         if ((await bus.getEventCount(this.id, vb.eventId)) >= this.cfg.maxBetsPerEvent) { eventCapSkips++; continue; }
         if (this.cfg.maxBetsPerDay != null && day.bets >= this.cfg.maxBetsPerDay) break;
 
-        const st = computeStake(vb, this.cfg, { bankrollBalance: balance });
+        // Ao vivo: nunca apostar mais do que o saldo real da casa. Dry-run: preview puro.
+        const st = computeStake(vb, this.cfg, { bankrollBalance: balance, realBalanceCap: this.cfg.dryRun ? undefined : this.balance?.cash });
         if (st.skip) {
           stakeSkips++;
           const nk = 'skip:' + key;
@@ -173,8 +236,9 @@ export class InstanceRunner {
 
       await this.heartbeat();
       if (acted === 0) {
+        const real = this.balance ? ` · saldo casa ${this.balance.symbol}${this.balance.cash.toFixed(2)}` : '';
         await this.maybeDiag(
-          `${matched.length} elegível(is), 0 nova(s): ${dedupeSkips} já apostada(s) (dedupe), ${stakeSkips} por stake, ${eventCapSkips} por limite de apostas/evento, ${dailyCapSkips} por limite diário — banca R$${balance.toFixed(2)}`,
+          `${matched.length} elegível(is), 0 nova(s): ${dedupeSkips} já apostada(s) (dedupe), ${stakeSkips} por stake, ${eventCapSkips} por limite de apostas/evento, ${dailyCapSkips} por limite diário — banca R$${balance.toFixed(2)}${real}`,
         );
       }
     } finally {
@@ -246,9 +310,14 @@ export class InstanceRunner {
       });
       if (!res.accepted) {
         await bus.releaseLock(this.id, key);
+        // Loga o DETALHE completo (code + description) p/ diagnóstico — não só o número.
+        // Ex.: 422 = PlacementHashInvalid (hash do cupom velho, tipicamente pós-429).
+        const detail = res.errors && res.errors.length
+          ? res.errors.map((x) => `${x.code}${x.description ? ': ' + x.description : ''}`).join(' | ')
+          : (res.errorCode != null ? String(res.errorCode) : 'sem detalhe (resposta vazia/não-JSON)');
         await logInstanceEvent(this.instance, InstanceEventType.SKIP,
-          `place recusado (${res.errorCode ?? res.errors?.map((x) => x.code).join(',') ?? '?'})`,
-          { level: 'warn', meta: { emissionId: vb.id, errors: res.errors } });
+          `place recusado (${res.errorCode ?? res.errors?.map((x) => x.code).join(',') ?? '?'}) — ${detail}`,
+          { level: 'warn', meta: { emissionId: vb.id, errorCode: res.errorCode, errors: res.errors, raw: res.raw } });
         return;
       }
       const rec = await recordInstanceBet({ instance: this.instance, vb, place: res, stake, bankrollId: this.bankrollId! });
@@ -275,15 +344,28 @@ export class InstanceRunner {
       await logInstanceEvent(this.instance, InstanceEventType.SESSION, 'sessão caiu — re-login no próximo ciclo', { level: 'warn' });
       throw e; // interrompe o loop deste tick; próximo tick reloga
     }
+    if (be?.kind === 'rate_limited') {
+      throw e; // interrompe o tick; handleFatal aplica o recuo (soft, sem parar a instância)
+    }
     if (be?.kind === 'datadome' || be?.kind === 'geocomply' || be?.kind === 'mfa' || be?.kind === 'rejected') {
       throw e; // fatal → handleFatal marca login_failed
     }
+    // plain_leg/update/place/network/unknown: loga o motivo e segue p/ a próxima seleção.
     await logInstanceEvent(this.instance, InstanceEventType.ERROR,
       `erro ao apostar: ${be?.message ?? e}`, { level: 'error', meta: { emissionId: vb.id, kind: be?.kind } });
   }
 
   private async handleFatal(e: unknown): Promise<void> {
     const be = e as BetanoError;
+    // 429 não é fatal: recua e continua viva (não parar/reiniciar por rate limit).
+    if (be?.kind === 'rate_limited' && this.running) {
+      this.backoffUntil = Date.now() + RATE_LIMIT_BACKOFF_MS;
+      await logInstanceEvent(this.instance, InstanceEventType.PROXY,
+        `429 (proxy/casa limitando) — recuando ${RATE_LIMIT_BACKOFF_MS / 1000}s`, { level: 'warn', meta: { kind: be.kind } });
+      await this.heartbeat('recuando do 429');
+      this.schedule();
+      return;
+    }
     const loginFail = be?.kind === 'datadome' || be?.kind === 'mfa' || be?.kind === 'rejected' || be?.kind === 'no_cookie';
     const status = loginFail ? InstanceStatus.LOGIN_FAILED : (be?.kind === 'auth' ? InstanceStatus.SESSION_EXPIRED : InstanceStatus.ERROR);
     this.running = false;
@@ -295,7 +377,10 @@ export class InstanceRunner {
 
   private async heartbeat(note?: string): Promise<void> {
     const ttl = Math.max(30, this.cfg.pollIntervalSec * 3);
-    await bus.setHeartbeat(this.id, ttl, { status: this.instance.status, note });
+    await bus.setHeartbeat(this.id, ttl, {
+      status: this.instance.status, note,
+      cash: this.balance?.cash, symbol: this.balance?.symbol, loggedAt: this.loggedAt || undefined,
+    });
     await AppDataSource.getRepository(BetInstance).update(this.id, { lastHeartbeatAt: new Date(), lastRunAt: new Date() });
   }
 

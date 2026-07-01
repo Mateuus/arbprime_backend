@@ -2,7 +2,8 @@
  * Erro tipado da automação Betano. O `kind` deixa o worker decidir a transição de
  * estado: `datadome`/`rejected`/`mfa`/`no_cookie` → login_failed (não adianta
  * re-tentar sem ação do usuário); `auth` → session_expired (re-login autônomo);
- * `network` → retry com backoff; `geocomply` → bloqueio de localização (proxy).
+ * `network` → retry com backoff; `geocomply` → bloqueio de localização (proxy);
+ * `rate_limited` → 429 (proxy/casa limitando) → recuar e desacelerar.
  */
 export type BetanoErrorKind =
   | 'datadome'    // captcha do DataDome no login (IP/proxy ruim)
@@ -12,8 +13,9 @@ export type BetanoErrorKind =
   | 'no_cookie'   // login "ok" mas sem cookie pocaauth
   | 'auth'        // chamada autenticada recusada (sessão caiu)
   | 'network'     // timeout / proxy morto / erro de transporte
+  | 'rate_limited'// 429 Too Many Requests (proxy/casa) — recuar, não é fatal
   | 'plain_leg'   // falha ao montar o cupom
-  | 'update'      // falha no updatebets
+  | 'update'      // falha no updatebets (não seguir p/ place com hash velho)
   | 'place'       // place recusado
   | 'unknown';
 
