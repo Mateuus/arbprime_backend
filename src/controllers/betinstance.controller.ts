@@ -23,6 +23,21 @@ const num = (v: unknown, def: number): number => {
   return Number.isFinite(n) ? n : def;
 };
 
+// Limite "0 ou vazio = sem limite": undefined (campo ausente) → default; null/0/
+// negativo → null (sem limite); positivo → o valor. Distingue ausência de "sem limite".
+const capInt = (v: unknown, def: number | null): number | null => {
+  if (v === undefined) return def;
+  if (v === null) return null;
+  const n = Math.floor(Number(v));
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+const capFloat = (v: unknown, def: number | null): number | null => {
+  if (v === undefined) return def;
+  if (v === null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
 /** Sanitiza/mescla a config vinda do frontend com os defaults (coerção + clamps). */
 function mergeConfig(partial: Partial<BetInstanceConfig> | undefined): BetInstanceConfig {
   const p = partial || {};
@@ -44,9 +59,9 @@ function mergeConfig(partial: Partial<BetInstanceConfig> | undefined): BetInstan
     dedupeScope: (['perEmission', 'perEventSelection', 'perEvent'].includes(String(p.dedupeScope))
       ? p.dedupeScope : d.dedupeScope) as BetInstanceConfig['dedupeScope'],
     maxBetsPerEvent: Math.max(1, Math.floor(num(p.maxBetsPerEvent, d.maxBetsPerEvent))),
-    maxBetsPerDay: p.maxBetsPerDay != null ? Math.max(0, Math.floor(num(p.maxBetsPerDay, 0))) : d.maxBetsPerDay,
-    maxStakePerDay: p.maxStakePerDay != null ? Math.max(0, num(p.maxStakePerDay, 0)) : d.maxStakePerDay,
-    stopLossDay: p.stopLossDay != null ? Math.max(0, num(p.stopLossDay, 0)) : d.stopLossDay,
+    maxBetsPerDay: capInt(p.maxBetsPerDay, d.maxBetsPerDay),
+    maxStakePerDay: capFloat(p.maxStakePerDay, d.maxStakePerDay),
+    stopLossDay: capFloat(p.stopLossDay, d.stopLossDay),
     pollIntervalSec: Math.max(5, Math.floor(num(p.pollIntervalSec, d.pollIntervalSec))),
     dryRun: p.dryRun != null ? !!p.dryRun : d.dryRun,
     restartPolicy: (['always', 'on-failure', 'never'].includes(String(p.restartPolicy))
