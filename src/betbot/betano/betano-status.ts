@@ -54,14 +54,31 @@ export interface SettledResult {
 }
 
 /**
- * Resultado de uma aposta LIQUIDADA a partir do RETORNO realizado (robusto, não
- * depende do Status int — que é ambíguo). Betano é back-only (sem comissão), então
- * o P&L é exatamente `Return − Stake`. Verificado com dados reais: aposta anulada
- * veio Return=Stake (Status 6). Ganho = Return≈Stake×odd; perda = Return≈0.
+ * Resultado de uma aposta LIQUIDADA. P&L exato = `Return − Stake` (Betano back-only,
+ * sem comissão). Verificado com dados reais da Betano:
+ *   - `Status 6` (ou `IsCreditCashout`) = **CASHOUT** — mesmo com Return=Stake NÃO é
+ *     anulada; conta como aposta resolvida. Sem esse override, cashout-no-stake
+ *     colidia com void e vinha "nula" no Analytix.
+ *   - anulada/push (ex.: Status 0, linha asiática batida exata) = **void**, Return=Stake.
+ *   - ganho = Return≈Stake×odd; perda = Return≈0.
+ * `hints` (status/isCreditCashout) desambiguam cashout de void; sem eles cai no
+ * fallback por retorno.
  */
-export function resolveSettledOutcome(stake: number, grossReturn: number, odd: number): SettledResult {
+export function resolveSettledOutcome(
+  stake: number,
+  grossReturn: number,
+  odd: number,
+  hints?: { status?: number; isCreditCashout?: boolean },
+): SettledResult {
   const S = Math.max(0, stake);
   const R = Math.max(0, grossReturn);
+  const profit = Math.round((R - S) * 100) / 100;
+
+  // Cashout explícito: Status 6 ou IsCreditCashout. Não é anulada, mesmo Return=Stake.
+  if (hints && (hints.status === 6 || hints.isCreditCashout === true)) {
+    return { result: 'cashout', grossReturn: R, profit };
+  }
+
   const fullWin = Math.round(S * odd * 100) / 100;
   const eps = 0.02;
   let result: SettledResult['result'];
@@ -69,5 +86,5 @@ export function resolveSettledOutcome(stake: number, grossReturn: number, odd: n
   else if (Math.abs(R - S) <= eps) result = 'void';
   else if (Math.abs(R - fullWin) <= Math.max(eps, fullWin * 0.02)) result = 'won';
   else result = 'cashout';
-  return { result, grossReturn: R, profit: Math.round((R - S) * 100) / 100 };
+  return { result, grossReturn: R, profit: result === 'void' ? 0 : profit };
 }

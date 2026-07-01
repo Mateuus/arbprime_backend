@@ -196,7 +196,7 @@ export class InstanceRunner {
       const map = new Map<string, SettleInfo>();
       for (const b of hist) {
         if (!b.settled || !b.betId) continue;
-        map.set(String(b.betId), resolveSettledOutcome(b.stakeAmount, b.returnAmount, b.oddValue));
+        map.set(String(b.betId), resolveSettledOutcome(b.stakeAmount, b.returnAmount, b.oddValue, { status: b.status, isCreditCashout: b.isCreditCashout }));
       }
       if (!map.size) return;
       const { settled, details } = await settleInstanceBets(this.id, map);

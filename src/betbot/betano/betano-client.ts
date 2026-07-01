@@ -60,6 +60,7 @@ export interface HistoryBet {
   possibleWinnings: string;
   settled: boolean;
   status: number;
+  isCreditCashout: boolean; // Betano IsCreditCashout — junto com Status 6 = cashout
   result: BetResult;
   stakeAmount: number;  // stake parseado (R$)
   returnAmount: number; // retorno realizado parseado (R$) — campo Return
@@ -83,6 +84,7 @@ function normalizeBet(b: any): HistoryBet {
   );
   const settled = !!(b.Settled ?? b.settled);
   const status = Number(b.Status ?? b.status ?? 0);
+  const isCreditCashout = !!(b.IsCreditCashout ?? b.isCreditCashout);
   const stakeAmount = parseMoney(b.Stake);
   const returnAmount = parseMoney(b.Return ?? b.return);
   const oddValue = Number(b.DecimalOdds ?? b.Odds ?? 0) || 0;
@@ -94,7 +96,8 @@ function normalizeBet(b: any): HistoryBet {
     possibleWinnings: String(b.PossibleWinnings ?? ''),
     settled,
     status,
-    result: settled ? resolveSettledOutcome(stakeAmount, returnAmount, oddValue).result : 'pending',
+    isCreditCashout,
+    result: settled ? resolveSettledOutcome(stakeAmount, returnAmount, oddValue, { status, isCreditCashout }).result : 'pending',
     stakeAmount,
     returnAmount,
     oddValue,
