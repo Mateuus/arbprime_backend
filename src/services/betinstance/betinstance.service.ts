@@ -18,6 +18,13 @@ import { InstanceEventType, BET_SOURCE_INSTANCE } from '../../enums/bet-instance
 import { computeBankrollBalance } from '../analytix.service';
 import { FlatValuebet } from '../../betworker/valuebet-source';
 import { PlaceResult } from '../../betbot/betano/betano-client';
+import { decryptSecret, isEncryptionConfigured } from '../../utils/crypto';
+
+/** Decifra o username (só ele — nunca a senha) p/ exibir na UI. Null se não der. */
+function safeUsername(enc: string | null): string | null {
+  if (!enc || !isEncryptionConfigured()) return null;
+  try { return decryptSecret(enc); } catch { return null; }
+}
 
 /** Serializa uma instância p/ o frontend — SEM segredos (só flag hasCredentials). */
 export function serializeInstance(inst: BetInstance) {
@@ -35,6 +42,7 @@ export function serializeInstance(inst: BetInstance) {
     lastRunAt: inst.lastRunAt,
     config: inst.config,
     hasCredentials: !!(inst.encUsername && inst.encPassword),
+    username: safeUsername(inst.encUsername), // só o login (senha nunca sai)
     createdAt: inst.createdAt,
     updatedAt: inst.updatedAt,
   };
