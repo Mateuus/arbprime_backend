@@ -88,11 +88,32 @@ async function initializeServices() {
     }
 }
 
+// Conecta no banco com RETRY + backoff. O MySQL (.210) pode não estar pronto quando esta
+// máquina sobe no boot — antes, o initialize() rejeitava, o `.catch` só logava (sem retry
+// nem exit) e o REST :3000 NUNCA subia; o processo ficava "online" (vivo pelo cron acima)
+// mas sem servidores, e o pm2 não reiniciava. Agora reconecta a cada `delayMs` até o banco
+// responder e só então sobe Fastify + WebSocket.
+async function connectDatabaseWithRetry(delayMs = 5000): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await AppDataSource.initialize();
+      logger.log("📄 Banco de dados conectado com sucesso...", LoggerClass.LogCategory.Database, "[MYSQL]", LoggerClass.LogColor.Magenta);
+      return;
+    } catch (error) {
+      logger.error(
+        `❌ Falha ao conectar no banco (tentativa ${attempt}): ${(error as Error).message}. Nova tentativa em ${delayMs / 1000}s...`,
+        LoggerClass.LogCategory.Database,
+        "[MYSQL]"
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 // Iniciar a verificação e inicialização dos serviços
-AppDataSource.initialize()
+connectDatabaseWithRetry()
   .then(() => {
     logger.log("📢 Inicializando serviços do sistema...", LoggerClass.LogCategory.Server, "[ROOT]", LoggerClass.LogColor.White);
-    logger.log("📄 Banco de dados conectado com sucesso...", LoggerClass.LogCategory.Database, "[MYSQL]", LoggerClass.LogColor.Magenta);
     // Semeia planos padrão e config dos providers de pagamento (idempotente).
     Promise.all([seedDefaultPlans(), seedPaymentConfig(), seedManualConfig()]).catch((e) =>
       logger.error(`Seed de planos/pagamento falhou: ${(e as Error).message}`, LoggerClass.LogCategory.Database, "[SEED]")
@@ -100,5 +121,8 @@ AppDataSource.initialize()
     initializeServices();
   })
   .catch((error) => {
-    console.error("Erro ao conectar no banco de dados:", error);
-});
+    // O loop acima só sai em sucesso; se ainda assim cair aqui é erro inesperado —
+    // encerra p/ o pm2 reiniciar, em vez de ficar zumbi sem servidores.
+    logger.error(`❌ Erro fatal na inicialização do banco: ${(error as Error).message}`, LoggerClass.LogCategory.Database, "[MYSQL]");
+    process.exit(1);
+  });
