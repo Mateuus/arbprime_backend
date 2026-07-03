@@ -269,7 +269,9 @@ export class InstanceRunner {
     if (now - this.lastSettleAt < 5 * 60 * 1000) return;
     this.lastSettleAt = now;
     try {
-      const hist = await this.client!.getHistory({ settled: true, days: 7 });
+      // Cursor-paginado + janela de 30d: a Betano ignora `page` (só devolve as ~10
+      // recentes), então sem paginar por data as apostas antigas nunca liquidavam.
+      const hist = await this.client!.getHistoryAll({ settled: true, days: 30 });
       const map = new Map<string, SettleInfo>();
       for (const b of hist) {
         if (!b.settled || !b.betId) continue;

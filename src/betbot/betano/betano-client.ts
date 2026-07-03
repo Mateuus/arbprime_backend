@@ -428,9 +428,14 @@ export class BetanoClient {
     }
     const errs = (pr.json?.data?.errors || pr.json?.errors || []) as Array<{ code: string; description: string }>;
     const receipt = pr.json?.data?.receipts?.[0];
-    const ok = pr.status === 200 && pr.json && !pr.json.errorCode && errs.length === 0 && pr.json?.data?.accepted !== false;
+    // SÓ conta como aceita se veio um betId de verdade. `accepted:true` sem receipt/betId
+    // é ambíguo → NÃO gravar (senão vira aposta-fantasma no Analytix sem elo com a casa).
+    const ok = pr.status === 200 && pr.json && !pr.json.errorCode && errs.length === 0
+      && pr.json?.data?.accepted !== false && receipt?.betId != null;
     if (!ok) {
-      return { accepted: false, dryRun: false, errorCode: pr.json?.errorCode, errors: errs, raw: pr.json ?? pr.body };
+      const errorCode = pr.json?.errorCode
+        ?? (pr.json?.data?.accepted !== false && !receipt?.betId ? 'no_betid' : undefined);
+      return { accepted: false, dryRun: false, errorCode, errors: errs, raw: pr.json ?? pr.body };
     }
     return {
       accepted: true, dryRun: false,
@@ -456,6 +461,37 @@ export class BetanoClient {
     if (r.status === 401 || r.status === 403) throw new BetanoError('auth', `bet-history não autenticado (${r.status})`);
     if (!r.json) throw new BetanoError('auth', 'bet-history não-JSON (sessão inválida?)');
     return findBets(r.json).map(normalizeBet);
+  }
+
+  /**
+   * Puxa TODO o histórico via CURSOR DE DATA. A Betano IGNORA o `page` (sempre devolve
+   * as ~10 mais recentes da janela) — pra paginar de verdade é preciso estreitar o
+   * `endDate` pro placedAt mais antigo já visto e repetir. Sem isto, o settle só via a
+   * página 1 e apostas antigas nunca liquidavam.
+   */
+  async getHistoryAll(p: { settled: boolean; days?: number; maxRounds?: number }): Promise<HistoryBet[]> {
+    const days = p.days ?? 30;
+    const startDate = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString();
+    const maxRounds = p.maxRounds ?? 40;
+    const out = new Map<string, HistoryBet>();
+    let endMs = Date.now() + 24 * 3600 * 1000;
+    for (let round = 0; round < maxRounds; round++) {
+      const endDate = new Date(endMs).toISOString();
+      const bets = await this.getHistory({ settled: p.settled, startDate, endDate, page: 1 });
+      if (!bets.length) break;
+      let oldest = Infinity;
+      let added = 0;
+      for (const b of bets) {
+        const t = Date.parse(b.placedAt);
+        if (Number.isFinite(t) && t < oldest) oldest = t;
+        if (b.betId && !out.has(b.betId)) { out.set(b.betId, b); added++; }
+      }
+      if (!Number.isFinite(oldest)) break;
+      const next = oldest - 1;
+      if (added === 0 || next >= endMs) break; // não avançou / nada novo → para
+      endMs = next;
+    }
+    return [...out.values()];
   }
 
   /** Acha uma aposta feita (por betId) no histórico — procura liquidadas e abertas. */
