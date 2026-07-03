@@ -122,6 +122,8 @@ export const serializeLeg = (leg: BetLeg) => ({
   bookmakerSlug: leg.bookmakerSlug,
   accountId: leg.accountId,
   houseEventId: leg.houseEventId,
+  houseSelectionId: leg.houseSelectionId,
+  houseBetId: leg.houseBetId, // id da aposta na casa (elo p/ conferir na betano)
   market: leg.market,
   rawMarket: leg.rawMarket,
   selection: leg.selection,
@@ -169,6 +171,7 @@ export const serializeBet = (bet: Bet) => {
     tags: bet.tags || [],
     notes: bet.notes,
     source: bet.source,
+    instanceId: bet.instanceId,
     hidden: bet.hidden,
     legs: legs.map(serializeLeg),
     settledAt: bet.settledAt,
