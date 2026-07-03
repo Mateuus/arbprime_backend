@@ -8,7 +8,10 @@ import {
 } from '../database/entities/BetInstance';
 import { DesiredState, InstanceStatus } from '../enums/bet-instance.enum';
 import { encryptSecret, decryptSecret, isEncryptionConfigured } from '../utils/crypto';
-import { publishCommand, clearSession, getBalanceCache, setBalance, loadSession } from '../betworker/bus';
+import {
+  publishCommand, clearSession, getBalanceCache, setBalance, loadSession, saveSession,
+  saveMfaPending, loadMfaPending, clearMfaPending,
+} from '../betworker/bus';
 import { serializeInstance, getUserInstancesStatus } from '../services/betinstance/betinstance.service';
 import { BetanoClient } from '../betbot/betano/betano-client';
 import { checkBetanoProxy } from '../betbot/betano/proxy-check';
@@ -236,8 +239,69 @@ export const testLogin = async (req: FastifyRequest, reply: FastifyReply) => {
     const s = await client.login({ username, password });
     return reply.send(createResponse(1, 'Login OK.', { ok: true, customerId: s.customerId, proxy: proxy ? `${proxy.ip}:${proxy.port}` : null }));
   } catch (e) {
-    const kind = (e as { kind?: string }).kind || 'unknown';
+    const be = e as { kind?: string; detail?: { challenge?: unknown; cookies?: Record<string, string> } };
+    const kind = be.kind || 'unknown';
+    // MFA: o login disparou o SMS. Se há instância, guarda o desafio p/ o /mfa completar.
+    if (kind === 'mfa_required' && be.detail?.cookies && be.detail?.challenge) {
+      if (b.instanceId) {
+        await saveMfaPending(b.instanceId, { cookies: be.detail.cookies, challenge: be.detail.challenge as never, at: Date.now() });
+      }
+      return reply.send(createResponse(1, 'MFA exigido — código enviado.', {
+        ok: false, mfaRequired: true, challenge: be.detail.challenge,
+        savedPending: !!b.instanceId,
+      }));
+    }
     return reply.send(createResponse(1, 'Login falhou.', { ok: false, kind, message: (e as Error).message }));
+  } finally {
+    await client.close().catch(() => {});
+  }
+};
+
+// ===================== MFA (código SMS) =====================
+
+/**
+ * Completa o desafio MFA: reusa o jar pendente (datadome/_cfuvid) + o código do SMS
+ * e efetiva o login. Salva a sessão; se a instância está rodando, recarrega o runner.
+ */
+export const submitMfaCode = async (req: FastifyRequest, reply: FastifyReply) => {
+  const userId = uid(req);
+  if (!userId) return reply.code(401).send(createResponse(0, 'Não autenticado.', []));
+  const { id } = req.params as { id: string };
+  const code = String((req.body as { code?: string })?.code || '').trim();
+  if (!code) return reply.code(400).send(createResponse(0, 'Informe o código MFA.', null));
+
+  const inst = await instRepo().findOneBy({ id, userId });
+  if (!inst) return reply.code(404).send(createResponse(0, 'Instância não encontrada.', null));
+  if (!(inst.encUsername && inst.encPassword)) return reply.code(400).send(createResponse(0, 'Instância sem credenciais.', null));
+
+  const pending = await loadMfaPending(id);
+  if (!pending) {
+    return reply.send(createResponse(0, 'Nenhum desafio MFA pendente (expirou). Clique em "Testar login"/reenviar p/ receber um novo código.', { expired: true }));
+  }
+
+  let username: string; let password: string;
+  try { username = decryptSecret(inst.encUsername); password = decryptSecret(inst.encPassword); }
+  catch { return reply.code(500).send(createResponse(0, 'Falha ao decifrar credenciais.', null)); }
+
+  const proxy = inst.config?.proxyId ? await loadProxyById(inst.config.proxyId) : null;
+  const client = new BetanoClient({ proxy, timeoutSec: 25 });
+  try {
+    client.importSession({ cookies: pending.cookies, loggedAt: new Date(pending.at).toISOString() });
+    const s = await client.completeLogin({ username, password }, code);
+    await saveSession(id, s);
+    await clearMfaPending(id);
+    if (inst.desiredState === DesiredState.RUNNING) await publishCommand({ type: 'reload', instanceId: id });
+    return reply.send(createResponse(1, 'MFA confirmado — sessão criada.', { ok: true, customerId: s.customerId }));
+  } catch (e) {
+    const be = e as { kind?: string; message?: string; detail?: { invalidCode?: boolean; challenge?: unknown; cookies?: Record<string, string> } };
+    if (be.kind === 'mfa_required') {
+      // re-desafio (código errado/expirado): atualiza o pendente e pede de novo
+      if (be.detail?.cookies && be.detail?.challenge) {
+        await saveMfaPending(id, { cookies: be.detail.cookies, challenge: be.detail.challenge as never, at: Date.now() });
+      }
+      return reply.send(createResponse(0, 'Código inválido ou expirado. Tente de novo ou reenvie.', { ok: false, invalidCode: true }));
+    }
+    return reply.send(createResponse(0, `Falha no MFA: ${be.message || be.kind}`, { ok: false, kind: be.kind }));
   } finally {
     await client.close().catch(() => {});
   }
@@ -286,9 +350,14 @@ export const getInstanceBalance = async (req: FastifyRequest, reply: FastifyRepl
     ? { loggedAt: saved!.loggedAt, ageMs: Date.now() - loggedAtMs, maxAgeMs: SESSION_MAX_AGE_MS, customerId: saved!.customerId }
     : null;
 
+  const pending = await loadMfaPending(id);
+  const mfa = pending
+    ? { pending: true, challenge: pending.challenge, at: pending.at, ageMs: Date.now() - pending.at }
+    : { pending: false };
+
   return reply.send(createResponse(1, 'Saldo carregado.', {
     balance, session, live: liveOk, liveError,
-    hasSession: !!saved,
+    hasSession: !!saved, mfa,
   }));
 };
 

@@ -12,7 +12,7 @@
  */
 import { getRedisClient } from '../core/redis';
 import { encryptSecret, decryptSecret, isEncryptionConfigured } from '../utils/crypto';
-import { BetanoSessionState } from '../betbot/betano/betano-client';
+import { BetanoSessionState, MfaPending } from '../betbot/betano/betano-client';
 
 const BASE = 'ArbPrime:BetInstance';
 export const CMD_CHANNEL = `${BASE}:Commands`;
@@ -29,6 +29,7 @@ export interface StatusMessage {
 
 const kHb = (id: string) => `${BASE}:${id}:hb`;
 const kSession = (id: string) => `${BASE}:${id}:session`;
+const kMfa = (id: string) => `${BASE}:${id}:mfa`;
 const kBalance = (id: string) => `${BASE}:${id}:balance`;
 const kPlaced = (id: string) => `${BASE}:${id}:placed`;
 const kLock = (id: string, key: string) => `${BASE}:${id}:lock:${key}`;
@@ -72,6 +73,22 @@ export async function loadSession(instanceId: string): Promise<BetanoSessionStat
 }
 export async function clearSession(instanceId: string): Promise<void> {
   await getRedisClient().del(kSession(instanceId));
+}
+
+// ---- MFA pendente (desafio 2FA aguardando o código do usuário) ----
+// TTL curto (5min): o código SMS expira; se passar, refaz o login (novo código).
+export async function saveMfaPending(instanceId: string, pending: MfaPending, ttlSec = 5 * 60): Promise<void> {
+  if (!isEncryptionConfigured()) throw new Error('INSTANCE_ENC_KEY ausente — não posso persistir MFA cifrado');
+  const blob = encryptSecret(JSON.stringify(pending));
+  await getRedisClient().set(kMfa(instanceId), blob, 'EX', ttlSec);
+}
+export async function loadMfaPending(instanceId: string): Promise<MfaPending | null> {
+  const blob = await getRedisClient().get(kMfa(instanceId));
+  if (!blob) return null;
+  try { return JSON.parse(decryptSecret(blob)) as MfaPending; } catch { return null; }
+}
+export async function clearMfaPending(instanceId: string): Promise<void> {
+  await getRedisClient().del(kMfa(instanceId));
 }
 
 // ---- saldo real da casa (cache p/ a UI ler sem bater na casa a cada request) ----

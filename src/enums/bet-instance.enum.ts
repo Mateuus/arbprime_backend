@@ -18,8 +18,9 @@ export enum InstanceStatus {
   RUNNING = 'running',                 // loop ativo
   PAUSED = 'paused',                   // pausada pelo usuário
   ERROR = 'error',                     // erro no loop (restart policy decide)
-  LOGIN_FAILED = 'login_failed',       // credencial recusada / DataDome / MFA
+  LOGIN_FAILED = 'login_failed',       // credencial recusada / DataDome
   SESSION_EXPIRED = 'session_expired', // sessão caiu; tentando re-login
+  MFA_REQUIRED = 'mfa_required',       // aguardando o código MFA (SMS) do usuário
 }
 
 // Escopo do dedupe "não apostar 2x na mesma seleção/evento".

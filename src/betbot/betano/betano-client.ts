@@ -20,6 +20,21 @@ const SITE = 'https://www.betano.bet.br';
 
 export interface BetanoCredentials { username: string; password: string; }
 
+/** Desafio MFA (2FA por SMS/email) devolvido pela Betano no login (Code "014"). */
+export interface MfaChallenge {
+  method: number;          // Customer2FAMethod (1 = SMS)
+  channel: number;         // CurrentChannel
+  maskedTarget: string;    // Customer2FAInfo, ex.: "551*****830"
+  options: Array<{ code: number; description: string }>; // canais (2=SMS, 0=email)
+}
+
+/** Estado pendente de MFA p/ persistir e completar depois (com o código do usuário). */
+export interface MfaPending {
+  cookies: Record<string, string>; // datadome/_cfuvid do desafio — reusar no submit
+  challenge: MfaChallenge;
+  at: number;
+}
+
 /** Estado da sessão para persistir (cifrado) no Redis e restaurar depois. */
 export interface BetanoSessionState {
   cookies: Record<string, string>;
@@ -83,6 +98,24 @@ export interface HistoryBet {
   betslipInfoId?: string;
   selections: Array<{ id: string; title: string; game: string; market: string; odd: string; eventId: string; settled: boolean }>;
   raw?: unknown;
+}
+
+/** Extrai o desafio MFA da resposta de login (Code "014", ResponseData.Status 31). */
+function parseMfaChallenge(parsed: any): MfaChallenge {
+  const rd = parsed?.ResponseData || {};
+  return {
+    method: Number(rd.Customer2FAMethod ?? 0),
+    channel: Number(rd.CurrentChannel ?? 0),
+    maskedTarget: String(rd.Customer2FAInfo ?? rd.CurrentChannelInfo ?? ''),
+    options: Array.isArray(rd.Options)
+      ? rd.Options.map((o: any) => ({ code: Number(o.Code), description: String(o.Description ?? '') }))
+      : [],
+  };
+}
+
+/** A resposta de login é um desafio de MFA (2FA pendente)? */
+function isMfaChallenge(parsed: any): boolean {
+  return parsed?.Code === '014' || Number(parsed?.ResponseData?.Status) === 31;
 }
 
 function findBets(json: any): any[] {
@@ -170,6 +203,7 @@ export class BetanoClient {
     } catch (e: any) {
       throw new BetanoError('network', `GET home falhou: ${e?.message || e}`);
     }
+    if (home.status === 429) throw new BetanoError('rate_limited', 'GET home 429 (proxy/casa limitando)');
     if (home.status !== 200) throw new BetanoError('network', `GET home status ${home.status}`);
 
     const loginUrl = `${SITE}/myaccount/login?user=${encodeURIComponent(creds.username)}`;
@@ -192,12 +226,17 @@ export class BetanoClient {
 
     const parsed = r.json;
     if (!(r.status === 200 && parsed && parsed.Code === '000')) {
+      if (r.status === 429) throw new BetanoError('rate_limited', 'login 429 (proxy/casa limitando) — recuar e tentar de novo');
       if (/captcha-delivery\.com|datadome/i.test(r.body)) {
         throw new BetanoError('datadome', 'login barrado por DataDome (IP/proxy ruim)');
       }
-      // MFA: Code específico / campo — heurística defensiva
-      if (parsed && /mfa|multifactor|two.?factor/i.test(JSON.stringify(parsed))) {
-        throw new BetanoError('mfa', 'conta exige MFA (não suportado no re-login autônomo)');
+      // MFA (SMS/email): o POST já DISPAROU o código. Guardamos o desafio + cookies
+      // (datadome/_cfuvid) p/ completar com o código do usuário (completeLogin).
+      if (isMfaChallenge(parsed)) {
+        const challenge = parseMfaChallenge(parsed);
+        throw new BetanoError('mfa_required', `MFA exigido — código enviado p/ ${challenge.maskedTarget || 'seu contato'}`, {
+          challenge, cookies: this.session.jar.toObject(),
+        });
       }
       throw new BetanoError('rejected', `login recusado: status=${r.status} code=${parsed?.Code ?? '?'}`, {
         remaining: parsed?.RemainingLoginAttempts,
@@ -207,6 +246,40 @@ export class BetanoClient {
     this.customerId = parsed.CustomerId;
     const s = this.exportSession();
     if (!s) throw new BetanoError('no_cookie', 'login OK mas sem cookie pocaauth');
+    return s;
+  }
+
+  /**
+   * Completa o login MFA: reenvia `POST /myaccount/login` com o código do SMS,
+   * REUSANDO o jar do desafio (datadome/_cfuvid) — NÃO refaz os GETs (isso mintaria
+   * um datadome novo e invalidaria o desafio). O caller importa os cookies pendentes
+   * (importSession/Jar) antes de chamar. Provado: re-POST com MultifactorAuthenticationCode.
+   */
+  async completeLogin(creds: BetanoCredentials, code: string): Promise<BetanoSessionState> {
+    const loginUrl = `${SITE}/myaccount/login?user=${encodeURIComponent(creds.username)}`;
+    const body = JSON.stringify({
+      ParentUrl: `${SITE}/`,
+      MultifactorAuthenticationCode: String(code).trim(),
+      SeonPayload: '',
+      Username: creds.username,
+      Password: creds.password,
+      LoginType: 1,
+    });
+    const r = await this.session.request('post', loginUrl, { body, headers: { ...xhrHeaders(loginUrl), Origin: SITE } });
+    if (r.status === 429) throw new BetanoError('rate_limited', 'MFA submit 429 (proxy/casa limitando)');
+    const parsed = r.json;
+    if (!(r.status === 200 && parsed && parsed.Code === '000')) {
+      if (isMfaChallenge(parsed)) {
+        // Code errado/expirado → a Betano re-desafia. Deixa o usuário tentar de novo.
+        throw new BetanoError('mfa_required', 'código MFA inválido ou expirado — peça um novo e tente de novo', {
+          challenge: parseMfaChallenge(parsed), cookies: this.session.jar.toObject(), invalidCode: true,
+        });
+      }
+      throw new BetanoError('rejected', `MFA recusado: status=${r.status} code=${parsed?.Code ?? '?'}`);
+    }
+    this.customerId = parsed.CustomerId;
+    const s = this.exportSession();
+    if (!s) throw new BetanoError('no_cookie', 'MFA OK mas sem cookie pocaauth');
     return s;
   }
 

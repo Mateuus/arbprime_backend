@@ -8,7 +8,8 @@
 export type BetanoErrorKind =
   | 'datadome'    // captcha do DataDome no login (IP/proxy ruim)
   | 'geocomply'   // bloqueio de localização no place (geoloc por IP)
-  | 'mfa'         // conta exige código MFA (não suportado no re-login autônomo)
+  | 'mfa'         // conta exige MFA e não dá p/ prosseguir (legado)
+  | 'mfa_required'// conta exige código MFA (SMS) — SUPORTADO: pedir o código ao usuário
   | 'rejected'    // credencial recusada
   | 'no_cookie'   // login "ok" mas sem cookie pocaauth
   | 'auth'        // chamada autenticada recusada (sessão caiu)

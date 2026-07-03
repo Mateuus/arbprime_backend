@@ -3,7 +3,7 @@ import {
   listInstances, getInstance, createInstance, updateInstance, deleteInstance,
   startInstance, pauseInstance, stopInstance, testLogin, listInstanceEvents,
   listInstanceProxies, checkInstanceProxies, clearInstanceEvents,
-  getInstanceBalance, renewInstanceSession,
+  getInstanceBalance, renewInstanceSession, submitMfaCode,
 } from "@Controllers";
 import { checkAuth } from "../middlewares/auth.middleware";
 
@@ -30,4 +30,5 @@ export default async function betInstanceRoutes(app: FastifyInstance) {
   app.delete("/:id/events", auth, clearInstanceEvents);
   app.get("/:id/balance", auth, getInstanceBalance);
   app.post("/:id/renew", auth, renewInstanceSession);
+  app.post("/:id/mfa", auth, submitMfaCode);
 }

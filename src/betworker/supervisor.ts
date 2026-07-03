@@ -133,6 +133,7 @@ export class Supervisor {
     const pol = inst.config.restartPolicy;
     if (pol === RestartPolicy.NEVER) return false;
     if (inst.status === InstanceStatus.LOGIN_FAILED) return false; // credencial ruim: não martela
+    if (inst.status === InstanceStatus.MFA_REQUIRED) return false; // espera o código do usuário
     if (pol === RestartPolicy.ON_FAILURE &&
         inst.status !== InstanceStatus.ERROR && inst.status !== InstanceStatus.SESSION_EXPIRED) {
       return false;

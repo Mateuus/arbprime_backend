@@ -10,7 +10,7 @@
 import { BetInstance, BetInstanceConfig } from '../database/entities/BetInstance';
 import { AppDataSource } from '../database/data-source';
 import { InstanceStatus, InstanceEventType } from '../enums/bet-instance.enum';
-import { BetanoClient, BetanoCredentials, BetanoBalance } from '../betbot/betano/betano-client';
+import { BetanoClient, BetanoCredentials, BetanoBalance, MfaChallenge } from '../betbot/betano/betano-client';
 import { BetanoError } from '../betbot/betano/errors';
 import { resolveSettledOutcome } from '../betbot/betano/betano-status';
 import { loadProxyById } from '../betbot/proxy-list';
@@ -135,7 +135,20 @@ export class InstanceRunner {
     }
 
     const creds = this.decryptCreds();
-    const s = await this.client.login(creds);
+    let s: Awaited<ReturnType<BetanoClient['login']>>;
+    try {
+      s = await this.client.login(creds);
+    } catch (e) {
+      const be = e as BetanoError;
+      // MFA: o login já disparou o SMS. Persiste o desafio (cookies+telefone) p/ o
+      // usuário completar o código na UI, e sobe mfa_required (handleFatal parqueia).
+      if (be?.kind === 'mfa_required' && be.detail) {
+        const d = be.detail as { challenge: MfaChallenge; cookies: Record<string, string> };
+        await bus.saveMfaPending(this.id, { cookies: d.cookies, challenge: d.challenge, at: Date.now() });
+      }
+      throw e;
+    }
+    await bus.clearMfaPending(this.id);
     await bus.saveSession(this.id, s);
     this.loggedAt = Date.parse(s.loggedAt) || Date.now();
     this.needRelogin = false;
@@ -364,6 +377,15 @@ export class InstanceRunner {
         `429 (proxy/casa limitando) — recuando ${RATE_LIMIT_BACKOFF_MS / 1000}s`, { level: 'warn', meta: { kind: be.kind } });
       await this.heartbeat('recuando do 429');
       this.schedule();
+      return;
+    }
+    // MFA: parqueia aguardando o código do usuário (não é erro, não reinicia sozinho).
+    if (be?.kind === 'mfa_required') {
+      this.running = false;
+      if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+      await logInstanceEvent(this.instance, InstanceEventType.SESSION,
+        `código MFA necessário — informe o SMS na aba Conta (${be?.message ?? ''})`, { level: 'warn', meta: { kind: be.kind } });
+      await this.setStatus(InstanceStatus.MFA_REQUIRED, be?.message ?? 'aguardando código MFA');
       return;
     }
     const loginFail = be?.kind === 'datadome' || be?.kind === 'mfa' || be?.kind === 'rejected' || be?.kind === 'no_cookie';
