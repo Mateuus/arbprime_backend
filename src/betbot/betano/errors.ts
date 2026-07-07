@@ -15,6 +15,7 @@ export type BetanoErrorKind =
   | 'auth'        // chamada autenticada recusada (sessão caiu)
   | 'network'     // timeout / proxy morto / erro de transporte
   | 'rate_limited'// 429 Too Many Requests (proxy/casa) — recuar, não é fatal
+  | 'terms_required'// casa exige aceitar termos/aviso de privacidade (RegulatoryBettingValidator)
   | 'plain_leg'   // falha ao montar o cupom
   | 'update'      // falha no updatebets (não seguir p/ place com hash velho)
   | 'place'       // place recusado

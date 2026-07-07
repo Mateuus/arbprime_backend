@@ -427,6 +427,13 @@ export class BetanoClient {
       throw new BetanoError('geocomply', 'place barrado por localização (GeoComply)');
     }
     const errs = (pr.json?.data?.errors || pr.json?.errors || []) as Array<{ code: string; description: string }>;
+    // Casa exige aceitar os termos/aviso de privacidade (regulatório BR) antes de apostar.
+    // NÃO é "aposta recusada" comum — é bloqueio que se repete até o usuário aceitar; então
+    // sobe erro tipado p/ o worker PARQUEAR (senão vira skip a cada tick, como no log).
+    if (errs.some((e) => e.code === 'RegulatoryBettingValidator' || /aceitar os termos/i.test(e.description || ''))) {
+      const desc = errs.find((e) => e.code === 'RegulatoryBettingValidator')?.description || 'aceitar os termos e condições';
+      throw new BetanoError('terms_required', `Betano exige aceitar os termos/aviso de privacidade: ${desc}`, { errors: errs });
+    }
     const receipt = pr.json?.data?.receipts?.[0];
     // SÓ conta como aceita se veio um betId de verdade. `accepted:true` sem receipt/betId
     // é ambíguo → NÃO gravar (senão vira aposta-fantasma no Analytix sem elo com a casa).

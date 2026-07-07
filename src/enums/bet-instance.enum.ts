@@ -21,6 +21,7 @@ export enum InstanceStatus {
   LOGIN_FAILED = 'login_failed',       // credencial recusada / DataDome
   SESSION_EXPIRED = 'session_expired', // sessão caiu; tentando re-login
   MFA_REQUIRED = 'mfa_required',       // aguardando o código MFA (SMS) do usuário
+  TERMS_REQUIRED = 'terms_required',   // casa exige aceitar termos/aviso — ação do usuário
 }
 
 // Escopo do dedupe "não apostar 2x na mesma seleção/evento".

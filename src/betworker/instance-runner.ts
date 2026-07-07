@@ -359,8 +359,8 @@ export class InstanceRunner {
       await logInstanceEvent(this.instance, InstanceEventType.SESSION, 'sessão caiu — re-login no próximo ciclo', { level: 'warn' });
       throw e; // interrompe o loop deste tick; próximo tick reloga
     }
-    if (be?.kind === 'rate_limited') {
-      throw e; // interrompe o tick; handleFatal aplica o recuo (soft, sem parar a instância)
+    if (be?.kind === 'rate_limited' || be?.kind === 'terms_required') {
+      throw e; // rate_limited → recuo (soft); terms_required → parqueia (handleFatal)
     }
     if (be?.kind === 'datadome' || be?.kind === 'geocomply' || be?.kind === 'mfa' || be?.kind === 'rejected') {
       throw e; // fatal → handleFatal marca login_failed
@@ -379,6 +379,16 @@ export class InstanceRunner {
         `429 (proxy/casa limitando) — recuando ${RATE_LIMIT_BACKOFF_MS / 1000}s`, { level: 'warn', meta: { kind: be.kind } });
       await this.heartbeat('recuando do 429');
       this.schedule();
+      return;
+    }
+    // Termos: parqueia até o usuário aceitar (na Betano/extensão). Não é erro, não reinicia.
+    if (be?.kind === 'terms_required') {
+      this.running = false;
+      if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+      await logInstanceEvent(this.instance, InstanceEventType.STATE,
+        `Betano exige ACEITAR OS TERMOS/aviso de privacidade — aceite no site (ou extensão) e reinicie a instância. (${be?.message ?? ''})`,
+        { level: 'warn', meta: { kind: be.kind } });
+      await this.setStatus(InstanceStatus.TERMS_REQUIRED, be?.message ?? 'aguardando aceite dos termos');
       return;
     }
     // MFA: parqueia aguardando o código do usuário (não é erro, não reinicia sozinho).
