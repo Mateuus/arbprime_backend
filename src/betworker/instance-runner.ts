@@ -154,6 +154,15 @@ export class InstanceRunner {
     this.needRelogin = false;
     this.balance = null; this.lastBalanceAt = 0; // força re-leitura do saldo pós-login
     await logInstanceEvent(this.instance, InstanceEventType.LOGIN, 'login/re-login OK', { meta: { customerId: s.customerId } });
+    // Reconhece avisos/termos pendentes já no login (evita o 1º place bloqueado por
+    // RegulatoryBettingValidator). Best-effort — não derruba o login se falhar.
+    try {
+      const acc = await this.client.acceptPendingNotices();
+      if (acc.acknowledged.length) {
+        await logInstanceEvent(this.instance, InstanceEventType.STATE,
+          `avisos/termos da casa reconhecidos no login: ${acc.acknowledged.join(',')}`, { level: 'info', meta: { acknowledged: acc.acknowledged } });
+      }
+    } catch { /* segue; o place trata reativamente se aparecer */ }
   }
 
   /** Lê o saldo real da casa (cacheado). Escreve no Redis p/ a UI. Não apostar sem isto. */
@@ -318,11 +327,28 @@ export class InstanceRunner {
 
     // AO VIVO: reserva o lock antes do place (anti place duplo).
     if (!(await bus.claimLock(this.id, key))) return;
+    const params = {
+      selectionId: vb.selectionId!, eventId: vb.eventId, eventUrl: vb.link,
+      amount: stake, minOdds: this.cfg.oddMin, hardCap: this.cfg.maxStakePerBet, dryRun: false,
+    };
     try {
-      const res = await this.client!.placeBet({
-        selectionId: vb.selectionId!, eventId: vb.eventId, eventUrl: vb.link,
-        amount: stake, minOdds: this.cfg.oddMin, hardCap: this.cfg.maxStakePerBet, dryRun: false,
-      });
+      let res;
+      try {
+        res = await this.client!.placeBet(params);
+      } catch (e) {
+        // Termos/aviso pendentes (RegulatoryBettingValidator): reconhece os popup
+        // notices automaticamente e reaposta 1×. Se não reconheceu nada, propaga (parqueia).
+        if ((e as BetanoError)?.kind === 'terms_required') {
+          const acc = await this.client!.acceptPendingNotices().catch(() => ({ acknowledged: [] as string[] }));
+          await logInstanceEvent(this.instance, InstanceEventType.STATE,
+            `aviso/termos da casa reconhecidos automaticamente (${acc.acknowledged.join(',') || 'nenhum'}) — reapostando`,
+            { level: acc.acknowledged.length ? 'info' : 'warn', meta: { acknowledged: acc.acknowledged } });
+          if (!acc.acknowledged.length) throw e;
+          res = await this.client!.placeBet(params); // 2ª falha de termos → propaga → parqueia
+        } else {
+          throw e;
+        }
+      }
       if (!res.accepted) {
         await bus.releaseLock(this.id, key);
         // Loga o DETALHE completo (code + description) p/ diagnóstico — não só o número.

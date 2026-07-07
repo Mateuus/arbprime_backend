@@ -109,3 +109,8 @@ export function xhrGetHeaders(referer: string): Record<string, string> {
   delete h['Content-Type'];
   return h;
 }
+
+/** Headers XHR para POST form-urlencoded (ex.: popupnotice/submitfeedback). */
+export function formHeaders(referer: string): Record<string, string> {
+  return { ...xhrHeaders(referer), 'Content-Type': 'application/x-www-form-urlencoded' };
+}

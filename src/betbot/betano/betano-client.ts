@@ -12,7 +12,7 @@
  * GeoComply pode barrar o place por geoloc-de-IP. Conta SEM MFA (re-login autônomo).
  */
 import { CycleSession, CycleSessionOpts } from '../cycle-session';
-import { Jar, Proxy, navHeaders, xhrHeaders, xhrGetHeaders } from '../http';
+import { Jar, Proxy, navHeaders, xhrHeaders, xhrGetHeaders, formHeaders } from '../http';
 import { BetanoError } from './errors';
 import { BetResult, parseMoney, resolveSettledOutcome } from './betano-status';
 
@@ -334,6 +334,38 @@ export class BetanoClient {
       symbol: String(b.currencySymbol || 'R$'),
       fetchedAt: Date.now(),
     };
+  }
+
+  /**
+   * Aceita os "popup notices" pendentes da casa (aviso de privacidade/termos), que
+   * bloqueiam o place com `RegulatoryBettingValidator`. Fluxo (capturado do browser):
+   *   GET  /myaccount/popupnotice/next        → { next: "/myaccount/popupnotice/<id>" }
+   *   POST /myaccount/popupnotice/submitfeedback (form) NoticeId=<id>&Accepted=true&CloseModal=False&GeneralError=
+   *        → { done:1, close:true|false }
+   * Notas dos testes: o notice regulatório (ex.: 194) volta `close:true` e some (destrava
+   * o place); um notice recorrente (ex.: 169) volta `close:false` e reaparece — por isso
+   * PARAMOS quando o mesmo id repete (senão loopa infinito). Devolve os ids reconhecidos.
+   */
+  async acceptPendingNotices(maxNotices = 8): Promise<{ acknowledged: string[] }> {
+    const acknowledged: string[] = [];
+    let lastId = '';
+    for (let i = 0; i < maxNotices; i++) {
+      const nx = await this.session.request('get', `${SITE}/myaccount/popupnotice/next`, {
+        headers: xhrGetHeaders(`${SITE}/myaccount/`),
+      });
+      const nextPath = nx.json?.next;
+      if (!nextPath || typeof nextPath !== 'string') break; // nada pendente
+      const id = nextPath.split('/').filter(Boolean).pop() || '';
+      if (!id || id === lastId) break; // recorrente/sticky (ex.: 169) → já reconhecido, para
+      lastId = id;
+      const body = `GeneralError=&CloseModal=False&NoticeId=${encodeURIComponent(id)}&Accepted=true`;
+      const fb = await this.session.request('post', `${SITE}/myaccount/popupnotice/submitfeedback`, {
+        body, headers: formHeaders(`${SITE}/myaccount/popupnotice/${id}`),
+      });
+      if (fb.status !== 200 || fb.json?.done == null) break;
+      acknowledged.push(id);
+    }
+    return { acknowledged };
   }
 
   /**
