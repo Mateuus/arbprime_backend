@@ -34,4 +34,4 @@ export enum NoDelayAccountStatus {
 }
 
 /** Nível de plano exigido para acessar o NoDelay. */
-export const NODELAY_MIN_LEVEL = 3;
+export const NODELAY_MIN_LEVEL = 2;
