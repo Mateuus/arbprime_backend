@@ -1,6 +1,7 @@
 import { FastifyRequest, FastifyReply } from "fastify";
 import { AppDataSource } from "@Database";
 import { Bookmaker } from "@Entities";
+import { NoDelayBookmakerConfig } from "../database/entities/Bookmaker";
 import { createResponse } from "@utils/resFormatter";
 
 const bookmakerRepository = AppDataSource.getRepository(Bookmaker);
@@ -41,6 +42,7 @@ export const addBookmaker = async (req: FastifyRequest, reply: FastifyReply) => 
   const body = (req.body || {}) as {
     slug?: string; name?: string; logoUrl?: string; color?: string; url?: string;
     cloneOf?: string | null; isActive?: boolean; sortOrder?: number; commissionPct?: number | null;
+    noDelayEnabled?: boolean; noDelayPlatform?: string | null; noDelayConfig?: NoDelayBookmakerConfig | null;
   };
 
   const slug = normalizeSlug(body.slug || "");
@@ -63,6 +65,9 @@ export const addBookmaker = async (req: FastifyRequest, reply: FastifyReply) => 
       cloneOf: body.cloneOf || null,
       commissionPct: body.commissionPct ?? null,
       isActive: body.isActive ?? true,
+      noDelayEnabled: body.noDelayEnabled ?? false,
+      noDelayPlatform: body.noDelayPlatform || null,
+      noDelayConfig: body.noDelayConfig ?? null,
       // Ordem automática: vai para o fim da lista (maior + 1).
       sortOrder: await nextSortOrder()
     });
@@ -107,7 +112,11 @@ export const updateBookmaker = async (req: FastifyRequest, reply: FastifyReply) 
       }
     }
 
-    const allowed = ["name", "logoUrl", "color", "url", "cloneOf", "commissionPct", "isActive"];
+    const allowed = [
+      "name", "logoUrl", "color", "url", "cloneOf", "commissionPct", "isActive",
+      // NoDelay: liga a casa na aposta rápida + endereço/protocolo de login.
+      "noDelayEnabled", "noDelayPlatform", "noDelayConfig",
+    ];
     for (const key of allowed) {
       if (key in body) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -1,7 +1,11 @@
 /**
  * Cifra REVERSÍVEL em repouso (AES-256-GCM) para segredos que precisam ser
- * recuperados em claro — hoje: usuário/senha da casa (Betano) da "Instância de
- * Bet", que a instância precisa pra RE-LOGAR autônomo quando a sessão cai.
+ * recuperados em claro. Usada por:
+ *   - "Instância de Bet": usuário/senha da casa (Betano), pra RE-LOGAR autônomo
+ *     quando a sessão cai. Aqui a senha NUNCA sai do backend.
+ *   - "NoDelay": usuário/senha + tokens de sessão das contas. Aqui a senha É
+ *     devolvida ao DONO da conta (rota /nodelay/accounts/:id/credentials) —
+ *     o login roda no browser dele, então não tem como ser diferente.
  *
  * ⚠️ Não confundir com o hash de senha do usuário do sistema (bcrypt, irreversível
  * em User.password). Aqui é reversível de propósito.

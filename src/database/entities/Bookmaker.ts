@@ -8,6 +8,38 @@ import {
 } from 'typeorm';
 
 /**
+ * Config do NoDelay por casa (ver enums/nodelay.enum.ts). Casas da MESMA
+ * `noDelayPlatform` falam o mesmo protocolo de login e só mudam o endpoint —
+ * por isso o endereço mora aqui (admin), não no código.
+ */
+export interface NoDelayBookmakerConfig {
+  /** Endpoint do WebSocket de login (ex.: 'wss://swarm.7games.bet.br/'). */
+  wssUrl?: string | null;
+  /** Origin/operador enviado no handshake do WSS e no mint de token (ex.: 'https://7games.bet.br'). */
+  origin?: string | null;
+  /** Host da API rogue/FSB da casa (ex.: 'https://prod20563.fssb.io'). É POR CASA
+   *  (7games=prod20563, betão=prod20562) — as odds e o place saem daqui. */
+  rogueUrl?: string | null;
+  /** swarm: site_id do request_session = partner_id da casa (7games = 18751367). Obrigatório. */
+  siteId?: string | null;
+  /** swarm: source do request_session (padrão 42 = web). */
+  source?: number | null;
+  /** swarm: idioma da sessão (padrão 'pt-br'). */
+  language?: string | null;
+
+  // ---- radar (widget de acompanhamento ao vivo) ----
+  /**
+   * Chave de assinatura do widget, POR ESPORTE (`{"default":"…","2":"…"}` —
+   * a chave é o sportId da casa; `default` = futebol). Fica em config e não no
+   * código porque rotaciona quando a casa renova o contrato. Sem ela o widget
+   * cai na versão 2D, que funciona igual.
+   */
+  radarProfiles?: Record<string, string> | null;
+  /** Origem que serve o /api/sportsbook/match-tracker-map (padrão: `url` da casa). */
+  radarMapUrl?: string | null;
+}
+
+/**
  * Casa de aposta cadastrada no ArbPrime. O `slug` é a CHAVE de ligação com o
  * arbbetting_master: deve ser exatamente o identificador que ele já fornece
  * (ex.: 'pinnacle', 'betano', 'superbet'). Com isso o frontend casa cada odd/
@@ -53,6 +85,22 @@ export class Bookmaker {
 
   @Column({ default: true })
   isActive!: boolean;
+
+  // ---- NoDelay (aposta rápida multi-conta) ----
+
+  // "ActiveNoDelay": libera a casa no NoDelay. Só casas com isto ligado (e com
+  // plataforma+wssUrl configurados) aparecem para o usuário conectar contas.
+  @Column({ default: false })
+  noDelayEnabled!: boolean;
+
+  // Família de login (ver NoDelayPlatform). Define QUAL protocolo falar; o
+  // ENDEREÇO vem do noDelayConfig — é o que permite reaproveitar o mesmo
+  // cliente em várias casas do mesmo grupo (7games/betão/7k/apostatudo).
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  noDelayPlatform!: string | null;
+
+  @Column({ type: 'json', nullable: true })
+  noDelayConfig!: NoDelayBookmakerConfig | null;
 
   // Ordem de exibição (menor primeiro).
   @Column({ type: 'int', default: 0 })

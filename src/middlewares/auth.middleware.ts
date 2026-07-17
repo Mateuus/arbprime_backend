@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import { createResponse } from "@utils";
 import { AppDataSource } from "@Database";
 import { User } from "@Entities";
+import { resolveUserAccess } from "@Services/subscription.service";
 
 // Carregar variáveis de ambiente
 dotenv.config();
@@ -63,5 +64,38 @@ export const checkAdmin = async (req: FastifyRequest, reply: FastifyReply) => {
     req.userData.role = user.role;
   } catch (error) {
     return reply.code(500).send(createResponse(0, "Erro ao validar permissão de administrador.", { error: (error as Error).message }));
+  }
+};
+
+// Fábrica de preHandler de autorização por NÍVEL do plano (use depois de checkAuth).
+// Ex.: `{ preHandler: [checkAuth, requireLevel(3)] }`.
+//
+// O nível vem de `resolveUserAccess`, e não de `User.level` direto nem do JWT:
+// ela é a fonte da verdade — expira em lote as assinaturas vencidas ANTES de
+// decidir e devolve o maior nível ainda ativo. Ler a coluna crua deixaria passar
+// quem tem plano vencido mas ainda não "tocado"; ler o JWT congelaria o nível no
+// momento do login (token vale 24h).
+//
+// Nega com 403 + `{ premium: true, ... }` — mesma convenção do gate de banca do
+// Analytix, que o frontend já usa para abrir o upsell de plano.
+export const requireLevel = (minLevel: number) => async (req: FastifyRequest, reply: FastifyReply) => {
+  const userId = req.userData?.userId;
+  if (!userId) {
+    return reply.code(401).send(createResponse(0, "Não autenticado.", []));
+  }
+
+  try {
+    const access = await resolveUserAccess(userId);
+    if ((access.level ?? 0) < minLevel) {
+      return reply.code(403).send(
+        createResponse(0, `Este recurso é exclusivo do plano nível ${minLevel}. Faça um upgrade para liberar.`, {
+          premium: true,
+          level: access.level ?? 0,
+          requiredLevel: minLevel,
+        }),
+      );
+    }
+  } catch (error) {
+    return reply.code(500).send(createResponse(0, "Erro ao validar o nível do plano.", { error: (error as Error).message }));
   }
 };
