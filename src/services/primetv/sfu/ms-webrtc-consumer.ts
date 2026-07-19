@@ -184,8 +184,20 @@ export class MsWebrtcConsumer {
     this.dtls = new RTCDtlsTransport(defaultPeerConfig, this.ice, certificate, [ProtectionProfileAes128CmHmacSha1_80]);
     this.dtls.role = "client";
     this.dtls.setRemoteParams(new RTCDtlsParameters(t.dtlsParameters.fingerprints, "server"));
-    // RTP decriptado (SRTP) → router → receivers.
-    this.dtls.onRtp.subscribe((rtp) => this.router.routeRtp(rtp));
+    // RTP decriptado (SRTP) → router → receivers. Conta e loga cada ssrc/pt NOVO
+    // (diagnóstico: se não chega aqui é SRTP/ICE; se chega mas o track não emite, é ssrc/codec).
+    let rtpIn = 0;
+    const seenSsrc = new Set<number>();
+    this.dtls.onRtp.subscribe((rtp) => {
+      rtpIn++;
+      const ss = rtp.header.ssrc;
+      if (!seenSsrc.has(ss)) {
+        seenSsrc.add(ss);
+        this.log(`dtls RTP IN novo ssrc=${ss} pt=${rtp.header.payloadType}`);
+      }
+      if (rtpIn % 500 === 0) this.log(`dtls RTP IN #${rtpIn}`);
+      this.router.routeRtp(rtp);
+    });
 
     // Manda NOSSO fingerprint pro mediasoup (connectConsumerTransport).
     const local = this.dtls.localParameters;
@@ -261,6 +273,14 @@ export class MsWebrtcConsumer {
       });
       receiver.addTrack(track);
 
+      // Conta o que o receiver EMITE (depois de achar codec+track) — se isso não sobe
+      // mas o "dtls RTP IN" sobe, o problema é ssrc/codec no receiver.
+      let emitted = 0;
+      track.onReceiveRtp.subscribe(() => {
+        emitted++;
+        if (emitted === 1 || emitted % 500 === 0) this.log(`track EMIT ${c.kind} #${emitted}`);
+      });
+
       if (ssrc != null) {
         router.registerRtpReceiver(receiver, ssrc);
         if (rtxSsrc != null) router.registerRtpReceiver(receiver, rtxSsrc);
@@ -272,8 +292,8 @@ export class MsWebrtcConsumer {
       this.receivers.push(receiver);
       tracks.push(track);
       this.log(
-        `receiver ${c.kind} ssrc=${ssrc} pt=${mainCodec?.payloadType} codecs=[${codecs
-          .map((k) => k.payloadType)
+        `receiver ${c.kind} ssrc=${ssrc} codec=${mainCodec?.mimeType}(pt${mainCodec?.payloadType}) all=[${codecs
+          .map((k) => `${k.mimeType}#${k.payloadType}`)
           .join(",")}] pronto`
       );
     }
