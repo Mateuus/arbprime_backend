@@ -8,6 +8,7 @@ import {
   RTCDtlsParameters,
   RtpRouter,
   RTCRtpReceiver,
+  RTCRtpCodecParameters,
   MediaStreamTrack,
   defaultPeerConfig,
   ProtectionProfileAes128CmHmacSha1_80,
@@ -43,9 +44,25 @@ interface SubConsumer {
   id: string;
   kind: "audio" | "video";
   rtpParameters: {
-    codecs: Array<{ payloadType: number; mimeType: string; clockRate: number; channels?: number }>;
+    codecs: Array<{
+      payloadType: number;
+      mimeType: string;
+      clockRate: number;
+      channels?: number;
+      parameters?: Record<string, unknown>;
+      rtcpFeedback?: Array<{ type: string; parameter?: string }>;
+    }>;
     encodings: Array<{ ssrc: number; rtx?: { ssrc: number } }>;
+    headerExtensions?: Array<{ uri: string; id: number }>;
   };
+}
+
+/** mediasoup manda `parameters` do codec como OBJETO; o werift quer string "k=v;k2=v2". */
+function paramsToString(p?: Record<string, unknown>): string {
+  if (!p || typeof p !== "object") return "";
+  return Object.entries(p)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(";");
 }
 
 export interface MsWebrtcConsumerOpts {
@@ -65,6 +82,8 @@ export class MsWebrtcConsumer {
   private router = new RtpRouter();
   private receivers: RTCRtpReceiver[] = [];
   private tracks: MediaStreamTrack[] = [];
+  private videoReceiver?: RTCRtpReceiver;
+  private videoSsrc?: number;
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
   private closed = false;
   private produtorPlay = "";
@@ -190,24 +209,87 @@ export class MsWebrtcConsumer {
       this.log("subscribed sem produtor ainda");
       return;
     }
+    // registerRtpReceiver é privado no TS, mas existe em runtime (JS não impede).
+    const router = this.router as unknown as {
+      registerRtpReceiver(r: RTCRtpReceiver, ssrc: number): void;
+    };
     const tracks: MediaStreamTrack[] = [];
     for (const c of [sub.video, sub.audio]) {
       if (!c) continue;
       const rtcpSsrc = Math.floor(Math.random() * 0xffffffff);
       const receiver = new RTCRtpReceiver(defaultPeerConfig, c.kind, rtcpSsrc);
-      const track = new MediaStreamTrack({ kind: c.kind });
+
+      // mediasoup manda os codecs com `parameters` OBJETO; o werift espera STRING.
+      // Sem popular receiver.codecs (via prepareReceive), o handleRTP faz
+      // `if (!codec) return` e o track NUNCA emite RTP → tela preta no viewer.
+      const codecs = (c.rtpParameters.codecs || []).map(
+        (cc) =>
+          new RTCRtpCodecParameters({
+            mimeType: cc.mimeType,
+            clockRate: cc.clockRate,
+            ...(cc.channels ? { channels: cc.channels } : {}),
+            payloadType: cc.payloadType,
+            rtcpFeedback: (cc.rtcpFeedback ||
+              []) as unknown as RTCRtpCodecParameters["rtcpFeedback"],
+            parameters: paramsToString(cc.parameters),
+          })
+      );
+      const encodings = c.rtpParameters.encodings || [];
+      const ssrc = encodings[0]?.ssrc;
+      const rtxSsrc = encodings[0]?.rtx?.ssrc;
+
+      // prepareReceive popula receiver.codecs + o mapa de RTX; setDtlsTransport liga o
+      // RTCP (RR/NACK/PLI) — sem ele não dá pra pedir keyframe.
+      receiver.prepareReceive({
+        codecs,
+        headerExtensions: [],
+        encodings,
+        rtcp: {},
+      } as unknown as Parameters<RTCRtpReceiver["prepareReceive"]>[0]);
+      if (this.dtls) receiver.setDtlsTransport(this.dtls);
+
+      // O track PRECISA do `ssrc` (senão addTrack não popula trackBySSRC e o handleRTP
+      // não acha o track pra emitir) e do `codec` principal (não-RTX) p/ o downstream
+      // casar o payload type na re-transmissão.
+      const mainCodec =
+        codecs.find((k) => !/\/rtx$/i.test(k.mimeType)) || codecs[0];
+      const track = new MediaStreamTrack({
+        kind: c.kind,
+        ssrc,
+        remote: true,
+        codec: mainCodec,
+      });
       receiver.addTrack(track);
-      const ssrc = c.rtpParameters.encodings?.[0]?.ssrc;
-      // registerRtpReceiver é privado no TS, mas existe em runtime (JS não impede).
+
       if (ssrc != null) {
-        (this.router as unknown as { registerRtpReceiver(r: RTCRtpReceiver, ssrc: number): void }).registerRtpReceiver(receiver, ssrc);
+        router.registerRtpReceiver(receiver, ssrc);
+        if (rtxSsrc != null) router.registerRtpReceiver(receiver, rtxSsrc);
+      }
+      if (c.kind === "video") {
+        this.videoReceiver = receiver;
+        this.videoSsrc = ssrc;
       }
       this.receivers.push(receiver);
       tracks.push(track);
-      this.log(`receiver ${c.kind} ssrc=${ssrc} registrado`);
+      this.log(
+        `receiver ${c.kind} ssrc=${ssrc} pt=${mainCodec?.payloadType} codecs=[${codecs
+          .map((k) => k.payloadType)
+          .join(",")}] pronto`
+      );
     }
     this.tracks = tracks;
     this.opts.onTracks(tracks);
+    // Pede keyframe cedo p/ o vídeo aparecer rápido (sem esperar o próximo natural).
+    this.requestKeyframe();
+    setTimeout(() => this.requestKeyframe(), 1500);
+  }
+
+  /** Pede um keyframe (PLI) ao ms server — vídeo aparece rápido / recupera de perda. */
+  requestKeyframe(): void {
+    if (this.closed || !this.videoReceiver || this.videoSsrc == null) return;
+    void this.videoReceiver.sendRtcpPLI(this.videoSsrc).catch(() => {
+      /* ms pode recusar; keyframe natural vem em ~2s */
+    });
   }
 
   private startKeepAlive(): void {
@@ -250,6 +332,8 @@ export class MsWebrtcConsumer {
     this.ice = undefined;
     this.dtls = undefined;
     this.receivers = [];
+    this.videoReceiver = undefined;
+    this.videoSsrc = undefined;
     this.produtorPlay = "";
     this.router = new RtpRouter();
   }
