@@ -136,7 +136,13 @@ interface Upstream {
   consumer: UpstreamConsumer;
   tracks: MediaStreamTrack[];
   downstreams: Map<string, SfuDownstream>;
+  closeTimer?: ReturnType<typeof setTimeout> | null; // graça: fecha só se ficar sem viewer
 }
+
+// Ao zerar viewers NÃO fecha o evento na hora — segura N ms. Se alguém reconectar
+// (troca de aba/rede), reaproveita o mesmo upstream (sem teardown/rebuild → sem o
+// "conexão WebRTC falhou" na corrida). Só fecha de verdade se ficar 0 por todo o período.
+const SFU_CLOSE_GRACE_MS = Number(process.env.PRIMETV_SFU_CLOSE_GRACE_MS) || 15000;
 
 class PrimeTvSfu {
   private upstreams = new Map<string, Upstream>();
@@ -148,7 +154,14 @@ class PrimeTvSfu {
   /** Garante o upstream (consumer werift) do evento. */
   private ensureUpstream(eventId: string, getView: () => Promise<PrimeTvView | null>): Upstream {
     let up = this.upstreams.get(eventId);
-    if (up) return up;
+    if (up) {
+      // Viewer voltou dentro da graça → cancela o fechamento e reaproveita.
+      if (up.closeTimer) {
+        clearTimeout(up.closeTimer);
+        up.closeTimer = null;
+      }
+      return up;
+    }
     up = { consumer: null as unknown as UpstreamConsumer, tracks: [], downstreams: new Map() };
     this.upstreams.set(eventId, up);
     const onTracks = (tracks: MediaStreamTrack[]) => this.onUpstreamTracks(eventId, tracks);
@@ -224,18 +237,27 @@ class PrimeTvSfu {
     this.upstreams.get(eventId)?.downstreams.get(clientId)?.addIce(candidate);
   }
 
-  /** Viewer saiu: fecha o downstream; se foi o último, fecha o upstream. */
+  /** Viewer saiu: fecha o downstream; se foi o último, ARMA a graça (não fecha na hora). */
   leave(eventId: string, clientId: string): void {
     const up = this.upstreams.get(eventId);
     if (!up) return;
     up.downstreams.get(clientId)?.close();
     up.downstreams.delete(clientId);
-    if (up.downstreams.size === 0) this.closeEvent(eventId);
+    if (up.downstreams.size === 0 && !up.closeTimer) {
+      up.closeTimer = setTimeout(() => {
+        const u = this.upstreams.get(eventId);
+        if (u && u.downstreams.size === 0) this.closeEvent(eventId); // ainda sem viewer → fecha
+      }, SFU_CLOSE_GRACE_MS);
+    }
   }
 
   private closeEvent(eventId: string, reason?: "ended" | "error"): void {
     const up = this.upstreams.get(eventId);
     if (!up) return;
+    if (up.closeTimer) {
+      clearTimeout(up.closeTimer);
+      up.closeTimer = null;
+    }
     this.upstreams.delete(eventId);
     // Se o EVENTO acabou (fornecedor sem view), avisa os viewers ANTES de fechar →
     // tela "Transmissão encerrada" (não o erro genérico de conexão).
