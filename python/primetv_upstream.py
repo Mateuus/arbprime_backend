@@ -20,6 +20,7 @@ Node: este processo emite {"evt":"reopen"} e sai; o Node respawna.
 import argparse
 import asyncio
 import json
+import os
 import socket
 import struct
 import sys
@@ -266,6 +267,17 @@ class Upstream:
             await self.send({"type": "keepAlive"})
 
 
+async def watch_parent() -> None:
+    """Se o Node (pai) morrer, o processo é re-parentado (ppid muda) → sai NA HORA.
+    Impede órfão segurando a view do fornecedor (o limite é 1 view/conta; órfão =
+    tempestade de reconexão)."""
+    orig = os.getppid()
+    while True:
+        await asyncio.sleep(2)
+        if os.getppid() != orig:
+            os._exit(0)
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--server", required=True)
@@ -274,6 +286,7 @@ async def main() -> None:
     ap.add_argument("--origin", default="https://bllsport.com")
     args = ap.parse_args()
     up = Upstream(args.server, args.token, args.udp_port, args.origin)
+    asyncio.create_task(watch_parent())
     try:
         await up.run()
     except Exception as e:  # noqa: BLE001

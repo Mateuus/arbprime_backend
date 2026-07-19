@@ -53,6 +53,8 @@ export class PyUpstream {
   private closed = false;
   private reopenTimer: ReturnType<typeof setTimeout> | null = null;
   private sessaoViewOn = false;
+  private spawnAt = 0; // p/ backoff: quanto durou a última conexão
+  private failStreak = 0;
 
   constructor(private opts: PyUpstreamOpts) {
     // Tracks LOCAIS (não-remote → writeRtp funciona), com codec fixo VP8/opus (é o
@@ -103,6 +105,7 @@ export class PyUpstream {
 
     this.udpPort = allocUdpPort();
     this.startUdp();
+    this.spawnAt = Date.now();
 
     this.log(`spawn python udp=${this.udpPort} server=${view.server}`);
     const proc = spawn(
@@ -188,10 +191,17 @@ export class PyUpstream {
 
   private scheduleReopen(): void {
     if (this.closed || this.reopenTimer) return;
+    // Backoff: conexão saudável (>20s) reconecta rápido; queda em cascata (fornecedor
+    // derrubando por limite/rate) espaça exponencial até 15s — não martela a conta.
+    const lasted = Date.now() - this.spawnAt;
+    if (lasted > 20000) this.failStreak = 0;
+    else this.failStreak = Math.min(this.failStreak + 1, 5);
+    const delay = this.failStreak === 0 ? 800 : Math.min(1500 * 2 ** (this.failStreak - 1), 15000);
+    if (this.failStreak > 0) this.log(`reopen em ${delay}ms (falha #${this.failStreak}, durou ${Math.round(lasted / 1000)}s)`);
     this.reopenTimer = setTimeout(() => {
       this.reopenTimer = null;
       void this.spawn();
-    }, 800);
+    }, delay);
   }
 
   /** aiortc já pede keyframe sozinho; no-op mantém a interface do consumer werift. */
