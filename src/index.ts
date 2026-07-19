@@ -12,6 +12,8 @@ import { AppDataSource } from "./database/data-source";
 import { getWorkerPath } from "@utils/functions";
 import { seedDefaultPlans, seedPaymentConfig, seedManualConfig } from "@utils/seed";
 import { rebuildEventExclusionCache } from "@Core/eventExclusionCache";
+import { bootstrapPrimeTvProvider } from "@Services/primetv/provider-client";
+import { primeTvCache } from "@Services/primetv/provider-cache";
 
 dotenv.config();
 
@@ -69,6 +71,15 @@ async function initializeServices() {
         } catch (e) {
             logger.error(`Falha ao reconstruir exclusões: ${(e as Error).message}`, LoggerClass.LogCategory.Database, "[EXCL]");
         }
+
+        // Login no fornecedor do PrimeTV (interno/automático). Fire-and-forget: não
+        // atrasa nem derruba a subida — só loga se autenticou (ou o que faltou).
+        void bootstrapPrimeTvProvider();
+
+        // Cache de eventos do PrimeTV: busca o cache do fornecedor a cada 5 min
+        // (refresh imediato no start). Roda no processo principal — alimenta o
+        // singleton que a API /primetv/events lê.
+        primeTvCache.start();
 
         // ✅ Iniciar o servidor Fastify
         logger.log("📄 Iniciando o servidor Fastify...", LoggerClass.LogCategory.Server, "[ROOT]", LoggerClass.LogColor.White);

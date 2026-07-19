@@ -23,3 +23,4 @@ export * from './affiliateAdmin.controller';
 export * from './status.controller';
 export * from './betinstance.controller';
 export * from './nodelay.controller';
+export * from './primetv.controller';

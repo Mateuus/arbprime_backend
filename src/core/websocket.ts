@@ -1,10 +1,14 @@
 import WebSocket, { WebSocketServer } from "ws";
 import jwt from 'jsonwebtoken';
+import { randomUUID } from "crypto";
 import dotenv from "dotenv";
 import { logger, LoggerClass } from "@Core/logger";
 import { getFormattedSurebets, getFormattedValuebets, getFormattedMiddles, getArbitragePairs, calculateArbitrage } from "@utils/functions";
 import { UserData } from "@Interfaces";
 import { getUserInstancesStatus } from "../services/betinstance/betinstance.service";
+import { primeTvSessions } from "../services/primetv/session-manager";
+import { MsProxy } from "../services/primetv/ms-proxy";
+import { primeTvSfu } from "../services/primetv/sfu/sfu-manager";
 
 dotenv.config();
 
@@ -19,6 +23,10 @@ type ClientPayload = {
 
 const clientsMap = new Map<WebSocket, ClientPayload>();
 const monitorClients = new Map<WebSocket, ClientPayload>();
+// PrimeTV: 1 consumer (proxy) por evento GLOBALMENTE — um join novo fecha o
+// anterior. Mata o duplo-consumer (StrictMode do dev / aba antiga) que fazia os
+// dois brigarem e cair no closeSubscribed. (Interino até o SFU consumir 1x.)
+const primeTvProxiesByEvent = new Map<string, MsProxy>();
 
 async function handleSingleRequest(ws: WebSocket, method: string, options: Record<string, unknown>, user: UserData | null) {
     let data: unknown = null;
@@ -145,10 +153,86 @@ export function startWebSocketServer() {
         //console.warn('[WS] Token inválido ou expirado:', token);
         user = null;
       }
-  
+
+      // Id do cliente p/ rastrear a sessão do PrimeTV; proxies de sinalização
+      // (um ms server por evento assistido nesta conexão).
+      const primeTvClientId = randomUUID();
+      const primeTvProxies = new Map<string, MsProxy>();
+      const primeTvSfuEvents = new Set<string>(); // eventos que este cliente assiste via SFU
+
       ws.on("message", async (message) => {
         try {
           const payload = JSON.parse(message.toString());
+
+          // ---- PrimeTV: proxy da sinalização mediasoup (separado das arbbets) ----
+          // { type:'primetv', action:'join'|'ms'|'leave', eventId, payload? }.
+          // 'join' abre o proxy pro ms server; 'ms' repassa uma msg do handshake
+          // (o backend injeta o msToken); a MÍDIA flui direto browser↔ms via ICE.
+          if (payload?.type === 'primetv') {
+            const eventId = String(payload.eventId || '');
+            const action = String(payload.action || '');
+            if (action === 'join' && eventId) {
+              const sourceId = primeTvSessions.getSourceId(eventId);
+              if (!sourceId) {
+                console.log(`[PrimeTV][wss] join ${eventId} → sem sessão (pediu /tv/:id antes?)`);
+                ws.send(JSON.stringify({ type: 'primetv', eventId, action: 'no-session' }));
+                return;
+              }
+              primeTvSessions.subscribe(eventId, primeTvClientId, () => {}); // rastreia o viewer
+              primeTvProxiesByEvent.get(eventId)?.close(); // dedupe GLOBAL: 1 consumer por evento
+              primeTvProxies.get(eventId)?.close(); // troca se já havia nesta conexão
+              // Proxy com view FRESCA por conexão (msToken próprio) + auto-reconnect.
+              const proxy = new MsProxy(
+                (msg) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); },
+                eventId,
+                () => primeTvSessions.viewForClient(eventId),
+              );
+              primeTvProxies.set(eventId, proxy);
+              primeTvProxiesByEvent.set(eventId, proxy);
+              void proxy.start();
+            } else if (action === 'ms' && eventId) {
+              primeTvProxies.get(eventId)?.forward((payload.payload || {}) as Record<string, unknown>);
+            } else if (action === 'leave' && eventId) {
+              console.log(`[PrimeTV][wss] leave ${eventId}`);
+              const p = primeTvProxies.get(eventId);
+              if (p) {
+                p.close();
+                primeTvProxies.delete(eventId);
+                if (primeTvProxiesByEvent.get(eventId) === p) primeTvProxiesByEvent.delete(eventId);
+              }
+              primeTvSessions.leave(eventId, primeTvClientId);
+            }
+            return; // não cai na lógica das arbbets
+          }
+
+          // ---- PrimeTV SFU: signaling WebRTC (backend consome 1x, re-transmite) ----
+          // { type:'primetv-sfu', action:'join'|'answer'|'ice'|'leave', eventId, sdp?, candidate? }
+          if (payload?.type === 'primetv-sfu') {
+            const eventId = String(payload.eventId || '');
+            const action = String(payload.action || '');
+            if (!eventId) return;
+            if (action === 'join') {
+              const sourceId = primeTvSessions.getSourceId(eventId);
+              if (!sourceId) {
+                ws.send(JSON.stringify({ type: 'primetv-sfu', action: 'no-session', eventId }));
+                return;
+              }
+              primeTvSessions.subscribe(eventId, primeTvClientId, () => {}); // rastreia o viewer
+              primeTvSfuEvents.add(eventId);
+              const signal = (msg: unknown) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); };
+              void primeTvSfu.join(eventId, primeTvClientId, () => primeTvSessions.viewForClient(eventId), signal);
+            } else if (action === 'answer') {
+              primeTvSfu.answer(eventId, primeTvClientId, String(payload.sdp || ''));
+            } else if (action === 'ice' && payload.candidate) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              primeTvSfu.ice(eventId, primeTvClientId, payload.candidate as any);
+            } else if (action === 'leave') {
+              primeTvSfu.leave(eventId, primeTvClientId);
+              primeTvSfuEvents.delete(eventId);
+            }
+            return; // não cai na lógica das arbbets
+          }
+
           const { method, options = {} } = payload;
 
           console.log(method,options);
@@ -189,6 +273,14 @@ export function startWebSocketServer() {
       ws.on("close", () => {
         clientsMap.delete(ws);
         monitorClients.delete(ws);
+        for (const [eid, p] of primeTvProxies) { // fecha os ms proxies desta conexão
+          p.close();
+          if (primeTvProxiesByEvent.get(eid) === p) primeTvProxiesByEvent.delete(eid);
+        }
+        primeTvProxies.clear();
+        for (const eid of primeTvSfuEvents) primeTvSfu.leave(eid, primeTvClientId); // fecha os downstreams SFU
+        primeTvSfuEvents.clear();
+        primeTvSessions.leaveAll(primeTvClientId); // solta o cliente de todas as sessões PrimeTV
         logger.log(`🔴 Cliente desconectado`, LoggerClass.LogCategory.Server, "WebSocket", LoggerClass.LogColor.Blue);
       });
     });

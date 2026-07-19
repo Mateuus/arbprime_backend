@@ -26,6 +26,7 @@ import adminCouponsRoutes from "./adminCoupons.routes";
 import statusRoutes from "./status.routes";
 import betInstanceRoutes from "./betinstance.routes";
 import noDelayRoutes from "./nodelay.routes";
+import primeTvRoutes from "./primetv.routes";
 
 export default async function routes(app: FastifyInstance) {
   app.register(homeRoutes);
@@ -55,4 +56,5 @@ export default async function routes(app: FastifyInstance) {
   app.register(statusRoutes, { prefix: "/status" });
   app.register(betInstanceRoutes, { prefix: "/instances" });
   app.register(noDelayRoutes, { prefix: "/nodelay" });
+  app.register(primeTvRoutes, { prefix: "/primetv" });
 }
