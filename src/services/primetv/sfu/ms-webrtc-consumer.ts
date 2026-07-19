@@ -231,6 +231,8 @@ export class MsWebrtcConsumer {
       this.log("subscribed sem produtor ainda");
       return;
     }
+    // Diagnóstico: o payload COMPLETO do vídeo (rtcpFeedback negociado? simulcast/scalabilityMode?).
+    this.log(`subscribed VIDEO=${JSON.stringify(sub.video ?? null).slice(0, 1800)}`);
     // registerRtpReceiver é privado no TS, mas existe em runtime (JS não impede).
     const router = this.router as unknown as {
       registerRtpReceiver(r: RTCRtpReceiver, ssrc: number): void;
