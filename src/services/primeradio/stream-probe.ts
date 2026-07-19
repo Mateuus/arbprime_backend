@@ -55,9 +55,16 @@ const isInternalHost = (host: string): boolean => {
   return a === 127 || a === 10 || a === 0 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
 };
 
+/** Para bitrate/canais/metaint: zero não é valor válido, é ausência. */
 const num = (v: string | null | undefined): number | null => {
   const n = Number(String(v ?? "").trim());
   return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+/** Para contagem de ouvintes: zero É informação ("ninguém ouvindo agora"). */
+const count = (v: unknown): number | null => {
+  const n = Number(String(v ?? "").trim());
+  return Number.isFinite(n) && n >= 0 ? n : null;
 };
 
 /** "no name"/"Unspecified description" são os placeholders do Icecast — tratamos como vazio. */
@@ -140,8 +147,8 @@ const fetchIcecastStats = async (url: URL): Promise<{ listeners: number | null; 
     const mount = list.find((s) => String(s.listenurl || "").endsWith(url.pathname)) || list[0];
     if (!mount) return empty;
     return {
-      listeners: num(String(mount.listeners ?? "")),
-      peak: num(String(mount.listener_peak ?? "")),
+      listeners: count(mount.listeners),
+      peak: count(mount.listener_peak),
       name: clean(String(mount.server_name ?? "")),
       genre: clean(String(mount.genre ?? "")),
     };
@@ -163,6 +170,10 @@ export const probeStream = async (rawUrl: string): Promise<StreamProbe> => {
   if (isInternalHost(url.hostname)) {
     return { ok: false, error: "Endereço interno não é permitido." };
   }
+
+  // ANTES de conectar: senão a nossa própria conexão entra na conta de ouvintes
+  // (medido: estação com 0 ouvintes reais reportava 2 — o probe e o player).
+  const stats = await fetchIcecastStats(url);
 
   let res: Response;
   try {
@@ -192,8 +203,6 @@ export const probeStream = async (rawUrl: string): Promise<StreamProbe> => {
   // Se não fomos ler a metadata, ainda assim precisamos soltar a conexão: sem
   // isso o servidor nos contaria como ouvinte grudado.
   if (!metaint || !res.body) void res.body?.cancel().catch(() => undefined);
-
-  const stats = await fetchIcecastStats(url);
 
   return {
     ok: true,
