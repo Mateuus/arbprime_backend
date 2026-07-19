@@ -22,7 +22,9 @@ export const CONSUMER_RTP_CAPABILITIES = {
       clockRate: 48000,
       channels: 2,
       parameters: { minptime: 10, useinbandfec: 1 },
-      rtcpFeedback: [{ type: "transport-cc", parameter: "" }],
+      // SEM transport-cc: com ele o mediasoup usa BWE por TCC (exige ack dos probes,
+      // que o werift não faz) e segura o vídeo. Sem ele cai no goog-remb → nosso REMB vale.
+      rtcpFeedback: [],
     },
     {
       mimeType: "video/VP8",
@@ -32,7 +34,6 @@ export const CONSUMER_RTP_CAPABILITIES = {
       parameters: {},
       rtcpFeedback: [
         { type: "goog-remb", parameter: "" },
-        { type: "transport-cc", parameter: "" },
         { type: "ccm", parameter: "fir" },
         { type: "nack", parameter: "" },
         { type: "nack", parameter: "pli" },
@@ -54,7 +55,6 @@ export const CONSUMER_RTP_CAPABILITIES = {
       parameters: { "level-asymmetry-allowed": 1, "packetization-mode": 1, "profile-level-id": "4d001f" },
       rtcpFeedback: [
         { type: "goog-remb", parameter: "" },
-        { type: "transport-cc", parameter: "" },
         { type: "ccm", parameter: "fir" },
         { type: "nack", parameter: "" },
         { type: "nack", parameter: "pli" },
@@ -76,7 +76,6 @@ export const CONSUMER_RTP_CAPABILITIES = {
       parameters: { "level-asymmetry-allowed": 1, "packetization-mode": 1, "profile-level-id": "42e01f" },
       rtcpFeedback: [
         { type: "goog-remb", parameter: "" },
-        { type: "transport-cc", parameter: "" },
         { type: "ccm", parameter: "fir" },
         { type: "nack", parameter: "" },
         { type: "nack", parameter: "pli" },
@@ -96,7 +95,6 @@ export const CONSUMER_RTP_CAPABILITIES = {
     { kind: "video", uri: "urn:ietf:params:rtp-hdrext:sdes:mid", preferredId: 1, preferredEncrypt: false, direction: "sendrecv" },
     { kind: "audio", uri: "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time", preferredId: 4, preferredEncrypt: false, direction: "sendrecv" },
     { kind: "video", uri: "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time", preferredId: 4, preferredEncrypt: false, direction: "sendrecv" },
-    { kind: "video", uri: "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01", preferredId: 5, preferredEncrypt: false, direction: "sendrecv" },
     { kind: "audio", uri: "urn:ietf:params:rtp-hdrext:ssrc-audio-level", preferredId: 10, preferredEncrypt: false, direction: "sendrecv" },
     { kind: "video", uri: "urn:3gpp:video-orientation", preferredId: 11, preferredEncrypt: false, direction: "sendrecv" },
     { kind: "video", uri: "urn:ietf:params:rtp-hdrext:toffset", preferredId: 12, preferredEncrypt: false, direction: "sendrecv" },
