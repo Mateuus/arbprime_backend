@@ -65,6 +65,7 @@
     "bcryptjs": "^2.4.3",
     "ccxt": "^4.4.53",
     "cycletls": "^2.0.5",
+    "discord.js": "^14.27.0",
     "dotenv": "^16.4.7",
     "fast-levenshtein": "^3.0.0",
     "fastify": "^5.8.5",
