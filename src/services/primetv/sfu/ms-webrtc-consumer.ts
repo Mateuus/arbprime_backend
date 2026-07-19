@@ -84,6 +84,9 @@ export class MsWebrtcConsumer {
   private tracks: MediaStreamTrack[] = [];
   private videoReceiver?: RTCRtpReceiver;
   private videoSsrc?: number;
+  private videoFlowing = false;
+  private keyframeTimer: ReturnType<typeof setInterval> | null = null;
+  private keepAliveLogged = false;
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
   private closed = false;
   private produtorPlay = "";
@@ -143,6 +146,10 @@ export class MsWebrtcConsumer {
           break;
         case "keepAlive": {
           const d = msg.data as { status?: boolean; produtorPlay?: string } | undefined;
+          if (!this.keepAliveLogged) {
+            this.keepAliveLogged = true;
+            this.log(`keepAlive#1 status=${d?.status} produtorPlay="${d?.produtorPlay ?? ""}"`);
+          }
           if (d?.status && d.produtorPlay) {
             if (this.produtorPlay === "") this.produtorPlay = d.produtorPlay;
             else if (d.produtorPlay !== this.produtorPlay) {
@@ -276,9 +283,15 @@ export class MsWebrtcConsumer {
       // Conta o que o receiver EMITE (depois de achar codec+track) — se isso não sobe
       // mas o "dtls RTP IN" sobe, o problema é ssrc/codec no receiver.
       let emitted = 0;
+      const kind = c.kind;
       track.onReceiveRtp.subscribe(() => {
         emitted++;
-        if (emitted === 1 || emitted % 500 === 0) this.log(`track EMIT ${c.kind} #${emitted}`);
+        if (kind === "video" && !this.videoFlowing) {
+          this.videoFlowing = true;
+          this.stopKeyframeLoop();
+          this.log("VÍDEO fluindo ✓");
+        }
+        if (emitted === 1 || emitted % 500 === 0) this.log(`track EMIT ${kind} #${emitted}`);
       });
 
       if (ssrc != null) {
@@ -299,17 +312,39 @@ export class MsWebrtcConsumer {
     }
     this.tracks = tracks;
     this.opts.onTracks(tracks);
-    // Pede keyframe cedo p/ o vídeo aparecer rápido (sem esperar o próximo natural).
-    this.requestKeyframe();
-    setTimeout(() => this.requestKeyframe(), 1500);
+    // Sem decoder no relay, ninguém pede keyframe → o ms só manda probe e o vídeo não
+    // começa. Mandamos PLI em loop até o vídeo fluir (o browser da referência faz isso
+    // automático via decoder).
+    this.startKeyframeLoop();
   }
 
-  /** Pede um keyframe (PLI) ao ms server — vídeo aparece rápido / recupera de perda. */
+  /** Pede um keyframe (PLI) ao ms server — vídeo aparece / recupera de perda. */
   requestKeyframe(): void {
     if (this.closed || !this.videoReceiver || this.videoSsrc == null) return;
-    void this.videoReceiver.sendRtcpPLI(this.videoSsrc).catch(() => {
-      /* ms pode recusar; keyframe natural vem em ~2s */
-    });
+    this.log(`→ PLI ssrc=${this.videoSsrc}`);
+    void this.videoReceiver
+      .sendRtcpPLI(this.videoSsrc)
+      .catch((e) => this.log(`PLI erro: ${(e as Error).message}`));
+  }
+
+  /** Manda PLI a cada 1s até o vídeo fluir (ou ~20s). */
+  private startKeyframeLoop(): void {
+    this.stopKeyframeLoop();
+    let tries = 0;
+    const tick = (): void => {
+      if (this.closed || this.videoFlowing) return this.stopKeyframeLoop();
+      this.requestKeyframe();
+      if (++tries >= 20) this.stopKeyframeLoop();
+    };
+    tick();
+    this.keyframeTimer = setInterval(tick, 1000);
+  }
+
+  private stopKeyframeLoop(): void {
+    if (this.keyframeTimer) {
+      clearInterval(this.keyframeTimer);
+      this.keyframeTimer = null;
+    }
   }
 
   private startKeepAlive(): void {
@@ -335,6 +370,9 @@ export class MsWebrtcConsumer {
   }
 
   private teardownMedia(): void {
+    this.stopKeyframeLoop();
+    this.videoFlowing = false;
+    this.keepAliveLogged = false;
     if (this.keepAliveTimer) {
       clearInterval(this.keepAliveTimer);
       this.keepAliveTimer = null;
