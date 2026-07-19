@@ -87,6 +87,7 @@ export class MsWebrtcConsumer {
   private videoReceiver?: RTCRtpReceiver;
   private videoSsrc?: number;
   private videoRtcpSsrc?: number;
+  private firSeq = 0;
   private videoFlowing = false;
   private feedbackTimer: ReturnType<typeof setInterval> | null = null;
   private keepAliveLogged = false;
@@ -333,13 +334,35 @@ export class MsWebrtcConsumer {
     this.startFeedbackLoop();
   }
 
-  /** Pede um keyframe (PLI) ao ms server — vídeo aparece / recupera de perda. */
+  /** Pede um keyframe (PLI + FIR) ao ms server — vídeo aparece / recupera de perda. */
   requestKeyframe(): void {
     if (this.closed || !this.videoReceiver || this.videoSsrc == null) return;
-    this.log(`→ PLI ssrc=${this.videoSsrc}`);
+    const dtls = this.dtls as unknown as { packetsSent?: number } | undefined;
+    this.log(`→ PLI+FIR ssrc=${this.videoSsrc} rtcpOut=${dtls?.packetsSent ?? "?"}`);
     void this.videoReceiver
       .sendRtcpPLI(this.videoSsrc)
       .catch((e) => this.log(`PLI erro: ${(e as Error).message}`));
+    this.sendFir();
+  }
+
+  /**
+   * FIR (RFC 5104, PSFB FMT=4) montado na mão — o werift não exporta FullIntraRequest.
+   * O produtor de origem é um browser (libwebrtc, GOP infinito): só emite keyframe sob
+   * PLI/FIR; alguns pipelines de replicação só propagam FIR.
+   */
+  private sendFir(): void {
+    if (!this.dtls || this.videoSsrc == null) return;
+    const buf = Buffer.alloc(20);
+    buf[0] = 0x84; // V=2, FMT=4 (FIR)
+    buf[1] = 206; // PT=PSFB
+    buf.writeUInt16BE(4, 2); // length = 5 words - 1
+    buf.writeUInt32BE(this.videoRtcpSsrc ?? 0, 4); // senderSsrc
+    buf.writeUInt32BE(0, 8); // mediaSsrc (0 no FIR; alvo vai no FCI)
+    buf.writeUInt32BE(this.videoSsrc, 12); // FCI: ssrc alvo
+    buf[16] = this.firSeq++ & 0xff; // FCI: seq
+    void (this.dtls.sendRtcp([{ serialize: () => buf } as unknown as Parameters<RTCDtlsTransport["sendRtcp"]>[0][0]]) as Promise<unknown>).catch(
+      (e) => this.log(`FIR erro: ${(e as Error).message}`)
+    );
   }
 
   /** REMB (banda alta) a cada 1.5s + PLI enquanto o vídeo não flui. */
