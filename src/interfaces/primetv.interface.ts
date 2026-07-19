@@ -52,7 +52,7 @@ export interface PrimeTvEvent {
   hasAudio: boolean;
   /** quantidade de canais/sinais disponíveis. */
   channels: number;
-  /** referências externas do evento (sofaScoreId, williamHillId, …). */
+  /** referências externas PÚBLICAS do evento (só sofaScoreId; williamHillId NÃO entra). */
   externalRefs: Record<string, string>;
 }
 

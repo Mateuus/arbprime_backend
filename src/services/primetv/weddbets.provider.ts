@@ -200,7 +200,8 @@ export const mapWeddbetsEvent = (r: WeddbetsRawEvent): PrimeTvEvent | null => {
     isLive: status === "live",
     hasAudio,
     channels: typeof r.canais === "number" ? r.canais : 0,
-    externalRefs: compactRefs({ sofaScoreId: r.sofaScoreId, williamHillId: r.williamHillId }),
+    // williamHillId NÃO vai pro cliente (ref interno do fornecedor).
+    externalRefs: compactRefs({ sofaScoreId: r.sofaScoreId }),
   };
 };
 
