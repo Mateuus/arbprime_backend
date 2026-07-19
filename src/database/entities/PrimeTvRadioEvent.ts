@@ -81,6 +81,11 @@ export class PrimeTvRadioEvent {
     @Column({ type: 'varchar', length: 120, nullable: true })
     station!: string | null;
 
+    // Imagem de fundo da página do jogo (estádio, arte do confronto...).
+    // Sem ela a página cai num gradiente com os escudos.
+    @Column({ type: 'text', nullable: true })
+    coverUrl!: string | null;
+
     // --- controle ---
     // Encerrado na mão pelo admin (some da lista pública imediatamente).
     @Column({ type: 'timestamp', nullable: true })

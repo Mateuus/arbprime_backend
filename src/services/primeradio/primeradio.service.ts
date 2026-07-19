@@ -116,6 +116,7 @@ const toPublic = (row: PrimeTvRadioEvent, now: number): PrimeRadioPublicEvent =>
     isLive: status === "live",
     station: row.station || null,
     stations: stationsOf(row).map(hideUrl),
+    coverUrl: row.coverUrl || null,
   };
 };
 

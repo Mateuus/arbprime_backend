@@ -29,6 +29,7 @@ interface RadioBody {
   endTime?: string;
   streamUrl?: string;
   station?: string | null;
+  coverUrl?: string | null;
   isActive?: boolean;
   /** Emissoras do jogo. Quando vem, SUBSTITUI a lista inteira. */
   stations?: StationBody[];
@@ -92,6 +93,7 @@ const normalize = (b: RadioBody, target: PrimeTvRadioEvent): void => {
   if (typeof b.endTime === "string" && b.endTime.trim()) target.endTime = b.endTime.trim();
   if (typeof b.streamUrl === "string" && b.streamUrl.trim()) target.streamUrl = b.streamUrl.trim();
   if ("station" in b) target.station = str(b.station);
+  if ("coverUrl" in b) target.coverUrl = str(b.coverUrl);
   if (b.isActive !== undefined) target.isActive = !!b.isActive;
 };
 

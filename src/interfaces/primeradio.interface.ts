@@ -61,6 +61,8 @@ export interface PrimeRadioPublicEvent {
   station: string | null;
   /** Emissoras disponíveis (sem URL). O ouvinte escolhe qual tocar. */
   stations: PrimeRadioStationPublic[];
+  /** Imagem de fundo da página do jogo (null = usa o gradiente padrão). */
+  coverUrl: string | null;
 }
 
 /** Item do painel admin: o público + os campos de gestão. */
