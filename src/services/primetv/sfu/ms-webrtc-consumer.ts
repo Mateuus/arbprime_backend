@@ -9,6 +9,8 @@ import {
   RtpRouter,
   RTCRtpReceiver,
   RTCRtpCodecParameters,
+  RtcpPayloadSpecificFeedback,
+  ReceiverEstimatedMaxBitrate,
   MediaStreamTrack,
   defaultPeerConfig,
   ProtectionProfileAes128CmHmacSha1_80,
@@ -84,8 +86,9 @@ export class MsWebrtcConsumer {
   private tracks: MediaStreamTrack[] = [];
   private videoReceiver?: RTCRtpReceiver;
   private videoSsrc?: number;
+  private videoRtcpSsrc?: number;
   private videoFlowing = false;
-  private keyframeTimer: ReturnType<typeof setInterval> | null = null;
+  private feedbackTimer: ReturnType<typeof setInterval> | null = null;
   private keepAliveLogged = false;
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
   private closed = false;
@@ -231,6 +234,7 @@ export class MsWebrtcConsumer {
     // registerRtpReceiver é privado no TS, mas existe em runtime (JS não impede).
     const router = this.router as unknown as {
       registerRtpReceiver(r: RTCRtpReceiver, ssrc: number): void;
+      extIdUriMap: Record<number, string>;
     };
     const tracks: MediaStreamTrack[] = [];
     for (const c of [sub.video, sub.audio]) {
@@ -257,11 +261,20 @@ export class MsWebrtcConsumer {
       const ssrc = encodings[0]?.ssrc;
       const rtxSsrc = encodings[0]?.rtx?.ssrc;
 
+      // As header extensions (transport-wide-cc, abs-send-time) PRECISAM ir pro werift:
+      // sem elas ele não decodifica o seq transport-wide → não manda TWCC → o mediasoup
+      // estima banda ~0 e NÃO manda vídeo (só áudio + probe). extIdUriMap fica no router.
+      const headerExtensions = (c.rtpParameters.headerExtensions || []).map((e) => ({
+        id: e.id,
+        uri: e.uri,
+      }));
+      for (const e of headerExtensions) router.extIdUriMap[e.id] = e.uri;
+
       // prepareReceive popula receiver.codecs + o mapa de RTX; setDtlsTransport liga o
-      // RTCP (RR/NACK/PLI) — sem ele não dá pra pedir keyframe.
+      // RTCP (RR/NACK/PLI/REMB) — sem ele não dá pra pedir keyframe nem sinalizar banda.
       receiver.prepareReceive({
         codecs,
-        headerExtensions: [],
+        headerExtensions,
         encodings,
         rtcp: {},
       } as unknown as Parameters<RTCRtpReceiver["prepareReceive"]>[0]);
@@ -288,8 +301,7 @@ export class MsWebrtcConsumer {
         emitted++;
         if (kind === "video" && !this.videoFlowing) {
           this.videoFlowing = true;
-          this.stopKeyframeLoop();
-          this.log("VÍDEO fluindo ✓");
+          this.log("VÍDEO fluindo ✓ (PLI para; REMB segue)");
         }
         if (emitted === 1 || emitted % 500 === 0) this.log(`track EMIT ${kind} #${emitted}`);
       });
@@ -301,6 +313,7 @@ export class MsWebrtcConsumer {
       if (c.kind === "video") {
         this.videoReceiver = receiver;
         this.videoSsrc = ssrc;
+        this.videoRtcpSsrc = rtcpSsrc;
       }
       this.receivers.push(receiver);
       tracks.push(track);
@@ -312,10 +325,10 @@ export class MsWebrtcConsumer {
     }
     this.tracks = tracks;
     this.opts.onTracks(tracks);
-    // Sem decoder no relay, ninguém pede keyframe → o ms só manda probe e o vídeo não
-    // começa. Mandamos PLI em loop até o vídeo fluir (o browser da referência faz isso
-    // automático via decoder).
-    this.startKeyframeLoop();
+    // O mediasoup gateia o vídeo por estimativa de banda: sem feedback ele só manda áudio
+    // + probe. Loop de feedback: REMB (banda alta) SEMPRE + PLI até o vídeo fluir. No
+    // browser da referência quem faz isso é o decoder/pc automaticamente.
+    this.startFeedbackLoop();
   }
 
   /** Pede um keyframe (PLI) ao ms server — vídeo aparece / recupera de perda. */
@@ -327,23 +340,43 @@ export class MsWebrtcConsumer {
       .catch((e) => this.log(`PLI erro: ${(e as Error).message}`));
   }
 
-  /** Manda PLI a cada 1s até o vídeo fluir (ou ~20s). */
-  private startKeyframeLoop(): void {
-    this.stopKeyframeLoop();
-    let tries = 0;
+  /** REMB (banda alta) a cada 1.5s + PLI enquanto o vídeo não flui. */
+  private startFeedbackLoop(): void {
+    this.stopFeedbackLoop();
     const tick = (): void => {
-      if (this.closed || this.videoFlowing) return this.stopKeyframeLoop();
-      this.requestKeyframe();
-      if (++tries >= 20) this.stopKeyframeLoop();
+      if (this.closed) return this.stopFeedbackLoop();
+      this.sendRemb(); // sempre — mantém a banda aberta no mediasoup
+      if (!this.videoFlowing) this.requestKeyframe(); // PLI só até o vídeo vir
     };
     tick();
-    this.keyframeTimer = setInterval(tick, 1000);
+    this.feedbackTimer = setInterval(tick, 1500);
   }
 
-  private stopKeyframeLoop(): void {
-    if (this.keyframeTimer) {
-      clearInterval(this.keyframeTimer);
-      this.keyframeTimer = null;
+  private stopFeedbackLoop(): void {
+    if (this.feedbackTimer) {
+      clearInterval(this.feedbackTimer);
+      this.feedbackTimer = null;
+    }
+  }
+
+  /** Manda REMB dizendo "tem 3 Mbps" → o mediasoup libera o vídeo (goog-remb). */
+  private sendRemb(): void {
+    if (this.closed || !this.dtls || this.videoSsrc == null) return;
+    try {
+      // bitrate = brMantissa << brExp → 187500 << 4 = 3.000.000 (~3 Mbps).
+      const remb = new RtcpPayloadSpecificFeedback({
+        feedback: new ReceiverEstimatedMaxBitrate({
+          senderSsrc: this.videoRtcpSsrc ?? 0,
+          mediaSsrc: 0,
+          brExp: 4,
+          brMantissa: 187500,
+          ssrcNum: 1,
+          ssrcFeedbacks: [this.videoSsrc],
+        } as unknown as ConstructorParameters<typeof ReceiverEstimatedMaxBitrate>[0]),
+      });
+      void this.dtls.sendRtcp([remb]);
+    } catch (e) {
+      this.log(`REMB erro: ${(e as Error).message}`);
     }
   }
 
@@ -370,7 +403,7 @@ export class MsWebrtcConsumer {
   }
 
   private teardownMedia(): void {
-    this.stopKeyframeLoop();
+    this.stopFeedbackLoop();
     this.videoFlowing = false;
     this.keepAliveLogged = false;
     if (this.keepAliveTimer) {
@@ -392,6 +425,7 @@ export class MsWebrtcConsumer {
     this.receivers = [];
     this.videoReceiver = undefined;
     this.videoSsrc = undefined;
+    this.videoRtcpSsrc = undefined;
     this.produtorPlay = "";
     this.router = new RtpRouter();
   }
