@@ -25,6 +25,7 @@ import struct
 import sys
 
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 # ---- decoder dummy: sem decode = sem CPU e sem fila infinita de frames ----
 import aiortc.rtcrtpreceiver as _rr
@@ -140,6 +141,10 @@ class Upstream:
                 await asyncio.wait_for(self.handshake(), HANDSHAKE_TIMEOUT_S)
                 out("resumed")
                 await self.keepalive_loop()
+            except ConnectionClosed:
+                # Fechamento NORMAL do fornecedor (closeSubscribed / ciclo do ms) —
+                # não é erro: o Node respawna e o vídeo volta.
+                self.reopen_reason = self.reopen_reason or "ws-closed"
             finally:
                 reader.cancel()
         if self.reopen_reason:
@@ -159,6 +164,7 @@ class Upstream:
                 if mtype == "keepAlive":
                     self.on_keepalive(data or {})
                 elif mtype == "closeSubscribed":
+                    out("log", msg="ms → closeSubscribed")
                     self.reopen_reason = "closeSubscribed"
                     await self.ws.close()
                 elif mtype in self.waiters:
