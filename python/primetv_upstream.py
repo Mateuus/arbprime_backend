@@ -71,6 +71,7 @@ class Upstream:
         self.device = None
         self.transport = None
         self.produtor_play = ""
+        self.resubscribing = False
         self.resumed = asyncio.Event()
         self.reopen_reason = None
         # ssrc → kind byte; rtx ssrc → (main ssrc, main pt) p/ unwrap RFC4588
@@ -183,42 +184,73 @@ class Upstream:
             if not self.produtor_play:
                 self.produtor_play = pp
             elif pp != self.produtor_play:
-                out("log", msg="produtorPlay mudou")
-                self.reopen_reason = "produtorPlay"
-                asyncio.ensure_future(self.ws.close())
+                # O fornecedor troca o produtor a cada ~2min. A referência NÃO reconecta:
+                # re-subscribe (novo transport) na MESMA conexão WS. Isso evita o gap de
+                # reconexão total (nova view/WS/processo) a cada 2 minutos.
+                self.produtor_play = pp
+                asyncio.ensure_future(self.resubscribe())
 
     async def handshake(self) -> None:
         fut = self.wait_for("routerCap")
         await self.send({"type": "getRouterRtpCapabilities"})
         router_cap = await fut
-
         self.device = Device(handlerFactory=AiortcHandler.createFactory(tracks=[]))
         await self.device.load(RtpCapabilities.model_validate(router_cap))
+        await self.subscribe_flow()
 
+    async def resubscribe(self) -> None:
+        """Produtor trocou → novo transport/consume na MESMA conexão (make-before-break)."""
+        if self.resubscribing or self.device is None:
+            return
+        self.resubscribing = True
+        old = self.transport
+        try:
+            out("log", msg="produtorPlay mudou → re-subscribe (mesma conexão)")
+            await self.subscribe_flow()
+            # fecha o transport antigo DEPOIS do novo estar consumindo (menos gap).
+            if old is not None and old is not self.transport:
+                try:
+                    await old.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            out("log", msg="re-subscribe ok")
+        except Exception as e:  # noqa: BLE001
+            out("log", msg=f"re-subscribe falhou ({e}) → reopen")
+            self.reopen_reason = self.reopen_reason or "resubscribe-fail"
+            if self.ws:
+                await self.ws.close()
+        finally:
+            self.resubscribing = False
+
+    async def subscribe_flow(self) -> None:
+        """createConsumerTransport → consume → resume. Reusável (1º subscribe e re-subscribe)."""
         fut = self.wait_for("subTransportCreated")
         await self.send({"type": "createConsumerTransport", "forceTcp": False})
         t = await fut
 
-        self.transport = self.device.createRecvTransport(
+        transport = self.device.createRecvTransport(
             id=t["id"],
             iceParameters=IceParameters.model_validate(t["iceParameters"]),
             iceCandidates=[IceCandidate.model_validate(c) for c in t["iceCandidates"]],
             dtlsParameters=DtlsParameters.model_validate(t["dtlsParameters"]),
         )
+        self.transport = transport
 
-        @self.transport.on("connect")
+        @transport.on("connect")
         async def on_connect(dtls: DtlsParameters) -> None:
             await self.send(
                 {
                     "type": "connectConsumerTransport",
-                    "transportId": self.transport.id,
+                    "transportId": transport.id,
                     "dtlsParameters": dtls.model_dump(exclude_none=True),
                 }
             )
 
-        @self.transport.on("connectionstatechange")
+        @transport.on("connectionstatechange")
         async def on_state(state: str) -> None:
             out("log", msg=f"transport {state}")
+            if transport is not self.transport:
+                return  # transport antigo (substituído no re-subscribe) → ignora
             if state == "connected":
                 await self.send({"type": "resume"})
             elif state in ("failed", "closed"):
@@ -234,6 +266,9 @@ class Upstream:
             self.reopen_reason = "sem-produtor"
             raise RuntimeError("subscribed sem video/audio")
 
+        # Novo produtor → troca o mapa de ssrc (o tap passa a mandar os ssrc novos).
+        self.ssrc_kind = {}
+        self.rtx_map = {}
         info = {}
         for kind_byte, key in ((0, "video"), (1, "audio")):
             item = sub.get(key)
@@ -246,7 +281,7 @@ class Upstream:
                 self.ssrc_kind[ssrc] = kind_byte
                 if enc.get("rtx", {}).get("ssrc"):
                     self.rtx_map[enc["rtx"]["ssrc"]] = (ssrc, main_pt)
-            await self.transport.consume(
+            await transport.consume(
                 id=item["id"],
                 producerId=item["producerId"],
                 kind=key,
