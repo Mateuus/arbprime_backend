@@ -8,6 +8,7 @@ import { startServer } from "@Core/server";
 import { startWebSocketServer } from "@Core/websocket";
 import { LogCategory, LogColor } from '@Enums';
 import EventHandler from "./schedulers/eventHandler";
+import { runImportSafe } from "@Services/primeradio/radios-import.service";
 import { AppDataSource } from "./database/data-source";
 import { getWorkerPath } from "@utils/functions";
 import { seedDefaultPlans, seedPaymentConfig, seedManualConfig } from "@utils/seed";
@@ -25,6 +26,12 @@ const eventHandler = new EventHandler();
 cron.schedule('*/1 * * * * *', () => {
     eventHandler.checkTasks();
 });
+
+// PrimeRádio: importa os jogos de rádio de hora em hora (minuto 5 pra não
+// disputar o boot). Desliga com PRIMERADIO_IMPORT=off.
+if (process.env.PRIMERADIO_IMPORT !== 'off') {
+    cron.schedule('5 * * * *', () => { void runImportSafe(); });
+}
 
 async function eventHandlerCreate() {
     

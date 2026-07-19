@@ -21,6 +21,7 @@ import { PrimeTvRadioStation } from './PrimeTvRadioStation';
 @Entity('primetv_radio_events')
 @Index('idx_radio_window', ['startTime', 'endTime'])
 @Index('idx_radio_active', ['isActive'])
+@Index('idx_radio_source', ['source', 'sourceId'])
 export class PrimeTvRadioEvent {
     @PrimaryGeneratedColumn('uuid')
     id!: string;
@@ -85,6 +86,23 @@ export class PrimeTvRadioEvent {
     // Sem ela a página cai num gradiente com os escudos.
     @Column({ type: 'text', nullable: true })
     coverUrl!: string | null;
+
+    // --- origem ---
+    // null = cadastrado à mão. Preenchido = veio de importador (ex.: radios.com.br);
+    // o par (source, sourceId) é a chave de deduplicação entre as rodadas.
+    @Column({ type: 'varchar', length: 60, nullable: true })
+    source!: string | null;
+
+    @Column({ type: 'varchar', length: 64, nullable: true })
+    sourceId!: string | null;
+
+    // Escudo vindo da fonte. Tem precedência sobre o derivado do SofaScore —
+    // jogo importado não traz id do SofaScore, mas traz a imagem pronta.
+    @Column({ type: 'text', nullable: true })
+    homeIconUrl!: string | null;
+
+    @Column({ type: 'text', nullable: true })
+    awayIconUrl!: string | null;
 
     // --- controle ---
     // Encerrado na mão pelo admin (some da lista pública imediatamente).

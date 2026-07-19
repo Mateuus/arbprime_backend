@@ -4,6 +4,7 @@ import { PrimeTvRadioEvent, PrimeTvRadioStation } from "@Entities";
 import { createResponse } from "@utils";
 import { getListen, listAdmin, listPublic } from "../services/primeradio/primeradio.service";
 import { probeStream } from "../services/primeradio/stream-probe";
+import { runImport } from "../services/primeradio/radios-import.service";
 
 /**
  * PrimeRádio — lista pública, escuta (autenticada) e CRUD do painel admin.
@@ -268,6 +269,22 @@ export const probePrimeRadioStream = async (req: FastifyRequest, reply: FastifyR
   } catch (error) {
     return reply.code(500).send(
       createResponse(0, "Erro ao testar o stream.", { error: (error as Error).message }),
+    );
+  }
+};
+
+/**
+ * POST /primeradio/admin/import — roda o importador do radios.com.br agora.
+ * O agendamento normal é de hora em hora; isto é o "não quero esperar".
+ */
+export const importPrimeRadioNow = async (_req: FastifyRequest, reply: FastifyReply) => {
+  try {
+    const result = await runImport();
+    const msg = `Importação: ${result.created} novos, ${result.updated} atualizados, ${result.stations} emissoras.`;
+    return reply.send(createResponse(1, msg, result));
+  } catch (error) {
+    return reply.code(500).send(
+      createResponse(0, "Erro ao importar.", { error: (error as Error).message }),
     );
   }
 };

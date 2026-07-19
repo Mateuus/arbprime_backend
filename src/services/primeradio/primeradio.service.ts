@@ -38,10 +38,11 @@ const realMs = (wallclockIso: string): number | null => {
 const crestUrl = (sofaId: string | null): string | null =>
   sofaId ? `https://api.sofascore.com/api/v1/team/${sofaId}/image` : null;
 
-const team = (name: string | null, sofaId: string | null): PrimeRadioTeam => ({
+const team = (name: string | null, sofaId: string | null, iconUrl?: string | null): PrimeRadioTeam => ({
   name: (name || "").trim(),
   sofaId: sofaId || null,
-  iconUrl: crestUrl(sofaId),
+  // escudo da fonte (jogo importado) ganha do derivado do SofaScore
+  iconUrl: iconUrl || crestUrl(sofaId),
 });
 
 // slug da competição: reusa o helper do PrimeTV (mesma regra, mesmo resultado).
@@ -103,8 +104,8 @@ const toPublic = (row: PrimeTvRadioEvent, now: number): PrimeRadioPublicEvent =>
     id: row.id,
     isVersus,
     title: isVersus ? `${row.homeName} x ${row.awayName}` : (row.title || "").trim(),
-    home: team(row.homeName, row.homeSofaId),
-    away: team(row.awayName, row.awaySofaId),
+    home: team(row.homeName, row.homeSofaId, row.homeIconUrl),
+    away: team(row.awayName, row.awaySofaId, row.awayIconUrl),
     competition,
     competitionKey: slugify(competition),
     country: row.country || null,

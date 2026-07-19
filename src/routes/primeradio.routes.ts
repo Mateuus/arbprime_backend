@@ -9,6 +9,7 @@ import {
   reopenPrimeRadioEvent,
   deletePrimeRadioEvent,
   probePrimeRadioStream,
+  importPrimeRadioNow,
 } from "@Controllers/primeradio.controller";
 import { checkAuth, checkAdmin } from "../middlewares/auth.middleware";
 
@@ -39,4 +40,7 @@ export default async function primeRadioRoutes(app: FastifyInstance) {
 
   // Testa um link de stream antes de salvar (o navegador não consegue: CORS)
   app.post("/admin/probe", admin, probePrimeRadioStream);
+
+  // Roda o importador do radios.com.br sob demanda (o cron roda de hora em hora)
+  app.post("/admin/import", admin, importPrimeRadioNow);
 }
