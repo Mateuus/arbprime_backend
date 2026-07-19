@@ -107,6 +107,20 @@ const mapStatus = (situacao?: number): PrimeTvStatus =>
 /** Evento ENCERRADO no bruto (situacao 4) — não pegar nem listar. */
 export const isFinishedRaw = (r: WeddbetsRawEvent): boolean => r.situacao === 4;
 
+/**
+ * Linha-PLACEHOLDER do fornecedor: um "evento" que na verdade é só um separador/
+ * cabeçalho ("🏈🎾🏀⚽ Próximos Eventos / Upcoming events ⚽🏀🎾🏈"). Não é jogo →
+ * ignorar. Casa por "próximos eventos" / "upcoming events" no nome (sem acento tb).
+ */
+export const isPlaceholderRaw = (r: WeddbetsRawEvent): boolean => {
+  const n = (r.nome || "").toLowerCase();
+  return (
+    n.includes("próximos eventos") ||
+    n.includes("proximos eventos") ||
+    n.includes("upcoming events")
+  );
+};
+
 // Os campos data* são horário de BRASÍLIA (GMT-3). O instante REAL (UTC) do
 // kickoff = wallclock + 3h. Usado pra promover agendado→ao vivo assim que o
 // horário passa, sem depender do cache (que confirma no refresh de 5 min).

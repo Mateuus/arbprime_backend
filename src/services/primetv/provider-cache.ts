@@ -1,7 +1,7 @@
 import axios from "axios";
 import dotenv from "dotenv";
 import { logger, LoggerClass } from "@Core/logger";
-import { WeddbetsRawEvent, isFinishedRaw } from "./weddbets.provider";
+import { WeddbetsRawEvent, isFinishedRaw, isPlaceholderRaw } from "./weddbets.provider";
 
 dotenv.config();
 
@@ -76,9 +76,9 @@ class PrimeTvProviderCache {
       const url = `${this.baseUrl}/api/evento/cache?_limit=${CACHE_LIMIT}`;
       const res = await axios.get<CacheResponse>(url, { timeout: 20000 });
       const itens = Array.isArray(res.data?.itens) ? res.data.itens : [];
-      // Só guardamos ao vivo + agendados: encerrados (situacao 4) são descartados
-      // na origem — não pegamos nem listamos pro usuário.
-      const kept = itens.filter((r) => !isFinishedRaw(r));
+      // Só guardamos ao vivo + agendados: encerrados (situacao 4) e as linhas-placeholder
+      // ("Próximos Eventos / Upcoming events") são descartados na origem.
+      const kept = itens.filter((r) => !isFinishedRaw(r) && !isPlaceholderRaw(r));
       const live = kept.filter((r) => r.situacao === 3).length; // ao vivo (situacao 3)
       const scheduled = kept.length - live; // agendados (situacao 1 etc.)
       this.items = kept;
