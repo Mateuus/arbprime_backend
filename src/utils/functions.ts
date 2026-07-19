@@ -3,7 +3,7 @@ import fs from 'fs';
 import dotenv from "dotenv";
 import { getRedisClient } from '@Core/redis';
 import { getExclusionSets } from '@Core/eventExclusionCache';
-import { MiddleData, MonitorOptions, SurebetData, UserData, ValuebetGroup } from '@Interfaces';
+import { MiddleData, MonitorOptions, MultiArbData, SurebetData, UserData, ValuebetGroup } from '@Interfaces';
 import stringSimilarity from "string-similarity";
 import levenshtein from "fast-levenshtein";
 dotenv.config();
@@ -19,6 +19,10 @@ const DV_LIST_PREMATCH_HASH_RKEY = process.env.DV_LIST_PREMATCH_HASH_RKEY || 'Du
 // Middles (apostas de intervalo): feed irmão das surebets (mesmo Redis), gerado
 // pelo arbbetting_master. HASH `ArbBetting:MiddleListPrematch` (campo = groupId).
 const MIDDLE_LIST_PREMATCH_HASH_RKEY = process.env.MIDDLE_LIST_PREMATCH_HASH_RKEY || 'MiddleListPrematch';
+// Múltipla (arbitragem de acumulada): feed irmão das surebets (mesmo Redis),
+// gerado pelo arbbetting_master. HASH `ArbBetting:MultiArbitrageListPrematch`
+// (campo = `groupIdA|groupIdB`, valor = MultiArbData).
+const MULTI_LIST_PREMATCH_HASH_RKEY = process.env.MULTI_ARB_LIST_PREMATCH_HASH_RKEY || 'MultiArbitrageListPrematch';
 const TEAM_ALIAS_HASH = "ArbPrime:Configs:TeamAliases";
 
 const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || "0.85"); // Padrão: 85%
@@ -404,6 +408,53 @@ export async function getFormattedMiddles(_type?: string, _options?: Record<stri
       return filtered;
     } catch (error) {
       console.error('Erro ao processar middles:', error);
+      return [];
+    }
+}
+
+/**
+ * Lê as MÚLTIPLAS (arbitragem de acumulada) VIVAS do Redis (HASH
+ * `ArbBetting:MultiArbitrageListPrematch`, campo = `groupIdA|groupIdB`, valor =
+ * MultiArbData). Espelha getFormattedSurebets/getFormattedMiddles:
+ *  - parseia cada par;
+ *  - reaproveita as exclusões GLOBAIS (admin): remove o par se QUALQUER um dos
+ *    dois jogos (group) estiver excluído, ou descarta o par se sobrar bilhete
+ *    usando uma casa/mercado excluído (a acumulada exige TODOS os bilhetes p/
+ *    cobrir os desfechos — tirar um quebra a arbitragem, então removemos o par);
+ *  - ordena os pares por profitMargin DESC.
+ * Todos os números já vêm PRONTOS do robô; aqui NÃO recalculamos nada.
+ */
+export async function getFormattedMultiplas(_type?: string, _options?: Record<string, unknown>, _user?: UserData | null): Promise<MultiArbData[]> {
+    try {
+      const redisClient = getRedisClient();
+      const raw = await redisClient.hgetall(`${ARB_FOLDER_BASE_RKEY}:${MULTI_LIST_PREMATCH_HASH_RKEY}`);
+      const entries = Object.entries(raw);
+
+      const parsed: MultiArbData[] = entries.map(([, json]) => JSON.parse(json as string) as MultiArbData);
+
+      // Exclusões GLOBAIS (admin): mesmo cache das surebets (house/market/event).
+      const { houses, markets, groups } = await getExclusionSets();
+      const filtered = (houses.size === 0 && markets.size === 0 && groups.size === 0)
+        ? parsed
+        : parsed.filter((ev) => {
+            // Qualquer um dos jogos do par excluído → remove o par inteiro.
+            if ((ev.games || []).some((g) => groups.has(g.groupId))) return false;
+            // Bilhete que use casa/mercado excluído quebra a cobertura → remove o par.
+            const tainted = (ev.tickets || []).some((tk) =>
+              (tk.legs || []).some((leg) => {
+                const house = `${(tk.bookmaker || '').toLowerCase()}:${leg.eventId}`;
+                return houses.has(house) || markets.has(`${house}:${leg.market}`);
+              }),
+            );
+            return !tainted;
+          });
+
+      // Pares por maior lucro garantido primeiro.
+      filtered.sort((a, b) => (b.profitMargin || 0) - (a.profitMargin || 0));
+
+      return filtered;
+    } catch (error) {
+      console.error('Erro ao processar múltiplas:', error);
       return [];
     }
 }

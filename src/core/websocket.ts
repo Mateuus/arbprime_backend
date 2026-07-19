@@ -3,7 +3,7 @@ import jwt from 'jsonwebtoken';
 import { randomUUID } from "crypto";
 import dotenv from "dotenv";
 import { logger, LoggerClass } from "@Core/logger";
-import { getFormattedSurebets, getFormattedValuebets, getFormattedMiddles, getArbitragePairs, calculateArbitrage } from "@utils/functions";
+import { getFormattedSurebets, getFormattedValuebets, getFormattedMiddles, getFormattedMultiplas, getArbitragePairs, calculateArbitrage } from "@utils/functions";
 import { UserData } from "@Interfaces";
 import { getUserInstancesStatus } from "../services/betinstance/betinstance.service";
 import { primeTvSessions } from "../services/primetv/session-manager";
@@ -41,6 +41,10 @@ async function handleSingleRequest(ws: WebSocket, method: string, options: Recor
 
     if (method === "middles") {
       data = await getFormattedMiddles(options.type as string, options, user);
+    }
+
+    if (method === "multipla") {
+      data = await getFormattedMultiplas(options.type as string, options, user);
     }
 
     if (method === "arbitrage_pairs") {
@@ -107,6 +111,10 @@ async function handleAutoBroadcast(method: string) {
 
     if (method === 'middles') {
       data = await getFormattedMiddles(type, options, user);
+    }
+
+    if (method === 'multipla') {
+      data = await getFormattedMultiplas(type, options, user);
     }
 
     if (method === 'arbitrage_pairs') {
@@ -289,6 +297,7 @@ export function startWebSocketServer() {
     setInterval(() => handleAutoBroadcast("arbitrage_betting"), 5000);
     setInterval(() => handleAutoBroadcast("valuebet"), 5000);
     setInterval(() => handleAutoBroadcast("middles"), 5000);
+    setInterval(() => handleAutoBroadcast("multipla"), 5000);
     setInterval(() => handleAutoBroadcast("bet_instances"), 5000);
     setInterval(() => handleAutoBroadcast("arbitrage_pairs"), 1000);
     setInterval(() => handleAutoBroadcast("monitor_pairs"), 1000);
