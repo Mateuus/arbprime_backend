@@ -30,6 +30,11 @@ const ICE_SERVERS = [{ urls: process.env.PRIMETV_STUN || "stun:stun.l.google.com
 const PUBLIC_IP = process.env.PRIMETV_PUBLIC_IP || "";
 const PORT_MIN = Number(process.env.PRIMETV_ICE_PORT_MIN) || 0;
 const PORT_MAX = Number(process.env.PRIMETV_ICE_PORT_MAX) || 0;
+// IP LOCAL de bind (LAN). Sem isso o werift binda 0.0.0.0 e gera candidate/socket
+// POR interface (lo, docker0, ens18) → ~6 sockets/viewer + candidatos inúteis. Bindar
+// só na ens18 → ~1 socket/viewer (o forward do router chega em 192.168.5.103) e ICE
+// mais rápido (sem lo/docker). O IP público segue anunciado via iceAdditionalHostAddresses.
+const ICE_LOCAL_IP = process.env.PRIMETV_ICE_LOCAL_IP || "";
 
 // Codecs que o downstream oferece pros viewers (bate com o que o upstream recebe).
 const DOWNSTREAM_CODECS = {
@@ -56,6 +61,7 @@ class SfuDownstream {
       iceServers: ICE_SERVERS,
       ...(PUBLIC_IP ? { iceAdditionalHostAddresses: [PUBLIC_IP] } : {}),
       ...(PORT_MIN && PORT_MAX ? { icePortRange: [PORT_MIN, PORT_MAX] as [number, number] } : {}),
+      ...(ICE_LOCAL_IP ? { iceInterfaceAddresses: { udp4: ICE_LOCAL_IP } } : {}),
     });
     this.pc.onIceCandidate.subscribe((candidate: RTCIceCandidate | undefined) => {
       if (candidate) {
@@ -106,10 +112,22 @@ class SfuDownstream {
   }
 
   close(): void {
+    // Reforço: para os iceTransports explicitamente ALÉM do pc.close() — garante a
+    // liberação dos sockets UDP (faixa 40000-40100) mesmo se o pc fechar no meio da
+    // negociação (viewer que fecha a aba antes do ICE conectar) → evita leak de socket.
+    const pc = this.pc as RTCPeerConnection & { iceTransports?: Array<{ stop(): Promise<void> }> };
+    const ices = pc.iceTransports ?? [];
     try {
-      void this.pc.close();
+      void pc.close();
     } catch {
       /* ignore */
+    }
+    for (const ice of ices) {
+      try {
+        void ice.stop();
+      } catch {
+        /* ignore */
+      }
     }
   }
 }
@@ -174,6 +192,7 @@ class PrimeTvSfu {
    */
   async join(eventId: string, clientId: string, getView: () => Promise<PrimeTvView | null>, signal: SfuSignal): Promise<void> {
     const up = this.ensureUpstream(eventId, getView);
+    up.downstreams.get(clientId)?.close(); // re-join do mesmo cliente: fecha o antigo (senão vaza socket)
     const ds = new SfuDownstream(signal, eventId);
     up.downstreams.set(clientId, ds);
 
@@ -182,7 +201,11 @@ class PrimeTvSfu {
     while (up.tracks.length === 0 && this.upstreams.has(eventId) && Date.now() - start < 20000) {
       await new Promise((r) => setTimeout(r, 300));
     }
-    if (!this.upstreams.get(eventId)?.downstreams.has(clientId)) return; // saiu enquanto esperava
+    // Se saiu OU foi superado por outro join deste cliente, fecha ESTE ds e sai.
+    if (this.upstreams.get(eventId)?.downstreams.get(clientId) !== ds) {
+      ds.close();
+      return;
+    }
     if (up.tracks.length === 0) {
       signal({ type: "primetv-sfu", action: "no-media" });
       return;
