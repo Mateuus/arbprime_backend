@@ -24,6 +24,7 @@ import os
 import socket
 import struct
 import sys
+import time
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -54,6 +55,7 @@ from pymediasoup.rtp_parameters import RtpCapabilities, RtpParameters  # noqa: E
 
 KEEPALIVE_S = 5.0
 HANDSHAKE_TIMEOUT_S = 30.0
+STALL_S = 8.0  # sem vídeo por mais que isso (e sem re-subscribe) → reconecta (fallback)
 
 
 def out(evt: str, **kw) -> None:
@@ -72,6 +74,7 @@ class Upstream:
         self.transport = None
         self.produtor_play = ""
         self.resubscribing = False
+        self.last_video = 0.0  # monotonic do último RTP de vídeo (watchdog de stall)
         self.resumed = asyncio.Event()
         self.reopen_reason = None
         # ssrc → kind byte; rtx ssrc → (main ssrc, main pt) p/ unwrap RFC4588
@@ -112,6 +115,8 @@ class Upstream:
                 self.udp.sendto(bytes([kind]) + packet.serialize(), self.udp_addr)
             else:
                 return
+            if kind == 0:
+                self.last_video = time.monotonic()  # watchdog de stall
             self.rtp_count[kind] += 1
             n = self.rtp_count[kind]
             if n == 1 or n % 1000 == 0:
@@ -142,7 +147,8 @@ class Upstream:
             try:
                 await asyncio.wait_for(self.handshake(), HANDSHAKE_TIMEOUT_S)
                 out("resumed")
-                await self.keepalive_loop()
+                self.last_video = time.monotonic()  # arma o watchdog
+                await asyncio.gather(self.keepalive_loop(), self.watchdog())
             except ConnectionClosed:
                 # Fechamento NORMAL do fornecedor (closeSubscribed / ciclo do ms) —
                 # não é erro: o Node respawna e o vídeo volta.
@@ -166,9 +172,10 @@ class Upstream:
                 if mtype == "keepAlive":
                     self.on_keepalive(data or {})
                 elif mtype == "closeSubscribed":
-                    out("log", msg="ms → closeSubscribed")
-                    self.reopen_reason = "closeSubscribed"
-                    await self.ws.close()
+                    # Igual à referência: NÃO reconecta. O produtor vai trocar e o próximo
+                    # keepAlive traz o novo produtorPlay → re-subscribe na MESMA conexão.
+                    # Se não vier (ms mudo/evento acabou), o watchdog reconecta como fallback.
+                    out("log", msg="ms → closeSubscribed (aguardando novo produtor)")
                 elif mtype in self.waiters:
                     self.waiters.pop(mtype).set_result(data)
                 else:
@@ -300,6 +307,21 @@ class Upstream:
         while True:
             await asyncio.sleep(KEEPALIVE_S)
             await self.send({"type": "keepAlive"})
+
+    async def watchdog(self) -> None:
+        """Fallback: se o vídeo travar por >STALL_S (closeSubscribed sem novo produtor,
+        ou stall) e não estiver re-subscribindo, reconecta. O caminho normal (re-subscribe
+        no produtorPlay) recupera antes disso e evita o reopen."""
+        while True:
+            await asyncio.sleep(2)
+            if self.resubscribing or self.last_video == 0.0:
+                continue
+            if time.monotonic() - self.last_video > STALL_S:
+                out("log", msg=f"vídeo travado >{STALL_S:.0f}s → reopen (fallback)")
+                self.reopen_reason = self.reopen_reason or "stall"
+                if self.ws:
+                    await self.ws.close()
+                return
 
 
 async def watch_parent() -> None:
