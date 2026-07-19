@@ -174,9 +174,24 @@ export const getListen = async (
   return { event, streamUrl: stations[0].streamUrl, stations };
 };
 
+/**
+ * Ordem do painel: ao vivo primeiro, depois o que começa mais cedo (o próximo
+ * jogo é o que o admin quer ver), e os encerrados no fim — entre eles, o mais
+ * recente antes, que é o que ainda interessa.
+ */
+const ADMIN_ORDER = (a: PrimeRadioAdminEvent, b: PrimeRadioAdminEvent): number => {
+  const rank = (e: PrimeRadioAdminEvent) => (e.isLive ? 0 : e.status === "upcoming" ? 1 : 2);
+  const ra = rank(a);
+  const rb = rank(b);
+  if (ra !== rb) return ra - rb;
+  const ta = new Date(a.startTime).getTime() || 0;
+  const tb = new Date(b.startTime).getTime() || 0;
+  return ra === 2 ? tb - ta : ta - tb; // encerrados: mais recente primeiro
+};
+
 /** Lista do PAINEL: tudo (inclusive encerrados/inativos) + campos de gestão. */
 export const listAdmin = async (): Promise<PrimeRadioAdminEvent[]> => {
-  const rows = await repo().find({ relations: ["stations"], order: { startTime: "DESC" } });
+  const rows = await repo().find({ relations: ["stations"], order: { startTime: "ASC" } });
   const now = Date.now();
   return rows.map((r) => ({
     ...toPublic(r, now),
@@ -185,5 +200,5 @@ export const listAdmin = async (): Promise<PrimeRadioAdminEvent[]> => {
     isActive: r.isActive,
     endedAt: r.endedAt ? r.endedAt.toISOString() : null,
     createdAt: r.createdAt ? r.createdAt.toISOString() : "",
-  }));
+  })).sort(ADMIN_ORDER);
 };
