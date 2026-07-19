@@ -45,12 +45,19 @@ export const discordConfig = {
     const base = (process.env.DISCORD_API_BASE_URL || "").replace(/\/+$/, "");
     return base ? `${base}/discord/callback` : "";
   },
-  /** Para onde devolvemos o usuário no site depois do link (sucesso ou erro). */
+  /**
+   * Para onde devolvemos o usuário no site depois do link (sucesso ou erro).
+   *
+   * Tem env própria (`DISCORD_FRONTEND_URL`) de propósito: o FRONTEND_PROD_URL
+   * alimenta a lista de origens do CORS, então ele não pode ser mudado só para
+   * ajustar o domínio de retorno do OAuth.
+   */
   get frontendReturnUrl() {
     const base =
-      process.env.NODE_ENV === "production"
+      process.env.DISCORD_FRONTEND_URL ||
+      (process.env.NODE_ENV === "production"
         ? process.env.FRONTEND_PROD_URL
-        : process.env.FRONTEND_DEV_URL;
+        : process.env.FRONTEND_DEV_URL);
     return (base || "http://localhost:4000").replace(/\/+$/, "");
   },
   /** OAuth só precisa de client id/secret + redirect (não exige o bot online). */
