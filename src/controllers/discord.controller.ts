@@ -66,7 +66,9 @@ export const startDiscordLink = async (req: FastifyRequest, reply: FastifyReply)
  */
 export const discordCallback = async (req: FastifyRequest, reply: FastifyReply) => {
   const { code, state, error } = req.query as { code?: string; state?: string; error?: string };
-  const back = (status: string) => `${discordConfig.frontendReturnUrl}/?discord=${status}`;
+  // Volta direto para a aba "Discord" do modal de conta, com o resultado na query.
+  const back = (status: string) =>
+    `${discordConfig.frontendReturnUrl}/?modal=user&page=discord&discord=${status}`;
 
   if (error || !code || !state) return reply.redirect(back("cancelado"));
 
