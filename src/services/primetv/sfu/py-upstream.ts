@@ -34,6 +34,7 @@ const REPO_ROOT = fs.existsSync(path.resolve(process.cwd(), "python/primetv_upst
 const PY = process.env.PRIMETV_PY || path.resolve(REPO_ROOT, "python/.venv/bin/python");
 const SCRIPT = path.resolve(REPO_ROOT, "python/primetv_upstream.py");
 const ORIGIN = process.env.PRIMETV_PROVIDER_URL || "https://bllsport.com";
+const SESSAOVIEW_MS = Number(process.env.PRIMETV_SESSAOVIEW_MS) || 15000;
 
 // Porta UDP por upstream (localhost). Contador simples numa faixa dedicada.
 let nextUdpPort = Number(process.env.PRIMETV_PY_UDP_BASE) || 45001;
@@ -52,7 +53,8 @@ export class PyUpstream {
   private tracksAnnounced = false;
   private closed = false;
   private reopenTimer: ReturnType<typeof setTimeout> | null = null;
-  private sessaoViewOn = false;
+  private sessaoViewTimer: ReturnType<typeof setInterval> | null = null;
+  private sessionView?: string; // token do sessaoView DESTA view (por-view!)
   private spawnAt = 0; // p/ backoff: quanto durou a última conexão
   private failStreak = 0;
 
@@ -98,11 +100,10 @@ export class PyUpstream {
       return;
     }
 
-    // Heartbeat sessaoView (a assinatura morre ~2min sem ele), ref-contado no provider.
-    if (!this.sessaoViewOn) {
-      this.sessaoViewOn = true;
-      primeTvProvider.acquireSessaoView();
-    }
+    // Heartbeat sessaoView com o token DESTA view (por-view!) — sem ele a assinatura
+    // morre em ~2min → closeSubscribed. (O `_id` do login NÃO serve; é o `sessaoView`.)
+    this.sessionView = view.sessionView || undefined;
+    this.startSessaoView();
 
     this.udpPort = allocUdpPort();
     this.startUdp();
@@ -190,6 +191,24 @@ export class PyUpstream {
     }
   }
 
+  /** Heartbeat do sessaoView (token POR-VIEW) — mantém a assinatura viva. */
+  private startSessaoView(): void {
+    this.stopSessaoView();
+    if (!this.sessionView) return;
+    const ping = (): void => {
+      if (this.sessionView) void primeTvProvider.pingSessaoView(this.sessionView);
+    };
+    ping();
+    this.sessaoViewTimer = setInterval(ping, SESSAOVIEW_MS);
+  }
+
+  private stopSessaoView(): void {
+    if (this.sessaoViewTimer) {
+      clearInterval(this.sessaoViewTimer);
+      this.sessaoViewTimer = null;
+    }
+  }
+
   private scheduleReopen(): void {
     if (this.closed || this.reopenTimer) return;
     // Backoff: conexão saudável (>20s) reconecta rápido; queda em cascata (fornecedor
@@ -223,10 +242,7 @@ export class PyUpstream {
       }
       this.proc = null;
     }
-    if (this.sessaoViewOn) {
-      this.sessaoViewOn = false;
-      primeTvProvider.releaseSessaoView();
-    }
+    this.stopSessaoView();
     try {
       this.videoTrack.stop();
       this.audioTrack.stop();

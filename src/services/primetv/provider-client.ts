@@ -204,18 +204,23 @@ class PrimeTvProviderClient {
    * keepAlive do ms). OBS: a resposta vem `{erro:true}` de propósito (falso
    * positivo) — a gente IGNORA o campo `erro`.
    */
-  async pingSessaoView(): Promise<void> {
+  async pingSessaoView(token?: string): Promise<void> {
     if (!this.isConfigured()) return;
-    if (!this.sessionId) await this.loadFromRedis();
-    const sessionId = this.sessionId;
-    if (!sessionId) return;
+    // IMPORTANTE: o token do sessaoView é o `sessaoView` DA VIEW (por-view), NÃO o
+    // `_id` do login. Pingar o do login não segura a assinatura → o fornecedor manda
+    // closeSubscribed em ~2min. Quem tem a view (PyUpstream) passa o token certo.
+    if (!token) {
+      if (!this.sessionId) await this.loadFromRedis();
+      token = this.sessionId || undefined;
+    }
+    if (!token) return;
     try {
       await axios.put(
         `${this.baseUrl}/api/sessaoView`,
-        { token: sessionId },
+        { token },
         { timeout: 10000, headers: { authorization: this.key || "" } },
       );
-      console.log(`[PrimeTV] sessaoView ✓ (id ${sessionId})`);
+      console.log(`[PrimeTV] sessaoView ✓ (token ${token.slice(0, 10)}…)`);
     } catch (e) {
       // Erro de REDE/HTTP (não o `erro:true` do corpo, que é normal). Só loga.
       console.warn(`[PrimeTV] sessaoView falhou: ${(e as Error).message}`);
