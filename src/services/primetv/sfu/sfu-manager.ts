@@ -141,8 +141,10 @@ interface Upstream {
 
 // Ao zerar viewers NÃO fecha o evento na hora — segura N ms. Se alguém reconectar
 // (troca de aba/rede), reaproveita o mesmo upstream (sem teardown/rebuild → sem o
-// "conexão WebRTC falhou" na corrida). Só fecha de verdade se ficar 0 por todo o período.
-const SFU_CLOSE_GRACE_MS = Number(process.env.PRIMETV_SFU_CLOSE_GRACE_MS) || 15000;
+// "conexão WebRTC falhou" na corrida). Só fecha se ficar 0 por todo o período.
+// 60s: o limite do fornecedor é 1 view por JOGO (não por conta), então segurar um
+// upstream ocioso só bloqueia reabrir AQUELE jogo (que ninguém vê) — custo baixo.
+const SFU_CLOSE_GRACE_MS = Number(process.env.PRIMETV_SFU_CLOSE_GRACE_MS) || 60000;
 
 class PrimeTvSfu {
   private upstreams = new Map<string, Upstream>();
