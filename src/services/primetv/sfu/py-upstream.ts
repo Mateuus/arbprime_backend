@@ -25,8 +25,9 @@ export interface PyUpstreamOpts {
   onClosed: () => void;
 }
 
-const PY = path.resolve(__dirname, "../../../python/.venv/bin/python");
-const SCRIPT = path.resolve(__dirname, "../../../python/primetv_upstream.py");
+// cwd = raiz do repo (pm2 roda dist/index.js de lá), tanto em dev quanto em prod.
+const PY = process.env.PRIMETV_PY || path.resolve(process.cwd(), "python/.venv/bin/python");
+const SCRIPT = path.resolve(process.cwd(), "python/primetv_upstream.py");
 const ORIGIN = process.env.PRIMETV_PROVIDER_URL || "https://bllsport.com";
 
 // Porta UDP por upstream (localhost). Contador simples numa faixa dedicada.
