@@ -14,6 +14,7 @@ import { seedDefaultPlans, seedPaymentConfig, seedManualConfig } from "@utils/se
 import { rebuildEventExclusionCache } from "@Core/eventExclusionCache";
 import { bootstrapPrimeTvProvider } from "@Services/primetv/provider-client";
 import { primeTvCache } from "@Services/primetv/provider-cache";
+import { bootstrapDiscord } from "@Services/discord";
 
 dotenv.config();
 
@@ -80,6 +81,10 @@ async function initializeServices() {
         // (refresh imediato no start). Roda no processo principal — alimenta o
         // singleton que a API /primetv/events lê.
         primeTvCache.start();
+
+        // Bot do Discord: sobe o gateway e liga a varredura de cargos (plano -> cargo).
+        // Fire-and-forget: Discord indisponivel nao pode impedir a API de subir.
+        void bootstrapDiscord();
 
         // ✅ Iniciar o servidor Fastify
         logger.log("📄 Iniciando o servidor Fastify...", LoggerClass.LogCategory.Server, "[ROOT]", LoggerClass.LogColor.White);

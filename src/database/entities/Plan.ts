@@ -46,6 +46,12 @@ export class Plan {
     @Column({ type: 'int', default: 0 })
     sortOrder!: number;
 
+    // Cargo do Discord concedido enquanto a assinatura deste plano estiver ativa.
+    // null/vazio = plano não concede cargo. O bot gerencia APENAS os cargos que
+    // aparecem aqui (+ DISCORD_ROLE_MEMBER), nunca toca em outros cargos do membro.
+    @Column({ type: 'varchar', length: 32, nullable: true })
+    discordRoleId!: string | null;
+
     @Column({ type: 'timestamp', default: () => 'CURRENT_TIMESTAMP' })
     createdAt!: Date;
 

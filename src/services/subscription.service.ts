@@ -72,6 +72,13 @@ export const activateSubscription = async (
   }
   await userRepo().save(user);
 
+  // Concede o cargo do Discord na hora (se a conta estiver vinculada). Import
+  // dinâmico p/ evitar ciclo — o módulo de cargos importa `resolveUserAccess`
+  // daqui. Fire-and-forget: o Discord fora do ar não pode derrubar a ativação.
+  void import('@Services/discord')
+    .then(({ syncUserRoles }) => syncUserRoles(userId))
+    .catch(() => undefined);
+
   return saved;
 };
 

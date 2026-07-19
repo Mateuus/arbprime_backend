@@ -42,4 +42,17 @@ export class User {
     // Quando o usuário ativou o teste gratuito (null = nunca usou). Garante 1 teste por conta.
     @Column({ type: 'timestamp', nullable: true })
     trialUsedAt!: Date | null;
+
+    // ----- Discord (vínculo via OAuth2) -----
+    // ID numérico (snowflake) do usuário no Discord. null = conta não vinculada.
+    // Único: uma conta do Discord não pode ser vinculada a dois usuários do site.
+    @Column({ type: 'varchar', length: 32, nullable: true, unique: true })
+    discordId!: string | null;
+
+    // Handle exibido (ex.: "fulano" ou "fulano#0001" em contas antigas). Só p/ UI.
+    @Column({ type: 'varchar', nullable: true })
+    discordUsername!: string | null;
+
+    @Column({ type: 'timestamp', nullable: true })
+    discordLinkedAt!: Date | null;
 }

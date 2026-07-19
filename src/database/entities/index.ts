@@ -28,3 +28,4 @@ export { BetInstance } from './BetInstance';
 export { BetInstanceEvent } from './BetInstanceEvent';
 export { NoDelayAccount } from './NoDelayAccount';
 export { NoDelayInstance } from './NoDelayInstance';
+export { PrimeTvRadioEvent } from './PrimeTvRadioEvent';

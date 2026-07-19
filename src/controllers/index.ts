@@ -24,3 +24,5 @@ export * from './status.controller';
 export * from './betinstance.controller';
 export * from './nodelay.controller';
 export * from './primetv.controller';
+export * from './primeradio.controller';
+export * from './discord.controller';
