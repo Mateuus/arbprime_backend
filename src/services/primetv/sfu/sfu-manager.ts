@@ -96,6 +96,15 @@ class SfuDownstream {
     void this.pc.addIceCandidate(candidate);
   }
 
+  /** Avisa o viewer que a transmissão ACABOU (evento encerrado) — tela dedicada. */
+  notifyEnded(): void {
+    try {
+      this.signal({ type: "primetv-sfu", action: "ended" });
+    } catch {
+      /* ignore */
+    }
+  }
+
   close(): void {
     try {
       void this.pc.close();
@@ -125,7 +134,7 @@ class PrimeTvSfu {
     up = { consumer: null as unknown as UpstreamConsumer, tracks: [], downstreams: new Map() };
     this.upstreams.set(eventId, up);
     const onTracks = (tracks: MediaStreamTrack[]) => this.onUpstreamTracks(eventId, tracks);
-    const onClosed = () => this.closeEvent(eventId);
+    const onClosed = (reason?: "ended" | "error") => this.closeEvent(eventId, reason);
     if (USE_AIORTC) {
       // aiortc: recebe getView e renova o msToken sozinho a cada (re)spawn.
       const consumer = new PyUpstream({ tag: eventId, getView, onTracks, onClosed });
@@ -201,10 +210,13 @@ class PrimeTvSfu {
     if (up.downstreams.size === 0) this.closeEvent(eventId);
   }
 
-  private closeEvent(eventId: string): void {
+  private closeEvent(eventId: string, reason?: "ended" | "error"): void {
     const up = this.upstreams.get(eventId);
     if (!up) return;
     this.upstreams.delete(eventId);
+    // Se o EVENTO acabou (fornecedor sem view), avisa os viewers ANTES de fechar →
+    // tela "Transmissão encerrada" (não o erro genérico de conexão).
+    if (reason === "ended") for (const ds of up.downstreams.values()) ds.notifyEnded();
     for (const ds of up.downstreams.values()) ds.close();
     try {
       up.consumer?.close();

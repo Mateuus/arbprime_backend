@@ -23,7 +23,7 @@ export interface PyUpstreamOpts {
   tag: string; // eventId (log)
   getView: () => Promise<PrimeTvView | null>; // view fresca (server+msToken) por spawn
   onTracks: (tracks: MediaStreamTrack[]) => void;
-  onClosed: () => void;
+  onClosed: (reason?: "ended" | "error") => void; // 'ended' = evento acabou (sem view)
 }
 
 // Raiz do repo, robusto ao cwd do pm2: tenta cwd, cai pro __dirname (dist/services/
@@ -86,14 +86,15 @@ export class PyUpstream {
     if (this.closed) return;
     if (!fs.existsSync(PY)) {
       this.log(`python não encontrado em ${PY} (rode: python3 -m venv python/.venv && pip install aiortc websockets pymediasoup)`);
-      this.opts.onClosed();
+      this.opts.onClosed("error");
       return;
     }
     const view = await this.opts.getView();
     if (this.closed) return;
     if (!view?.server || !view?.msToken) {
-      this.log("sem view (server/msToken) → fecha");
-      this.opts.onClosed();
+      // Sem view = o evento acabou no fornecedor (transmissão encerrada).
+      this.log("sem view (server/msToken) → evento encerrado");
+      this.opts.onClosed("ended");
       return;
     }
 
