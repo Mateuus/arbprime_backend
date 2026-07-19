@@ -5,7 +5,13 @@ import {
   type RTCIceCandidate,
 } from "werift";
 import { MsWebrtcConsumer } from "./ms-webrtc-consumer";
+import { PyUpstream } from "./py-upstream";
 import { PrimeTvView } from "@Interfaces";
+
+// Upstream do SFU: 'aiortc' (Python, cliente WebRTC real — o werift era rejeitado
+// pra vídeo) ou 'werift' (legado, só p/ comparar). Default = aiortc.
+const USE_AIORTC = (process.env.PRIMETV_UPSTREAM || "aiortc") !== "werift";
+type UpstreamConsumer = MsWebrtcConsumer | PyUpstream;
 
 /**
  * SFU do PrimeTV: 1 UPSTREAM por evento (MsWebrtcConsumer consome o ms server do
@@ -100,7 +106,7 @@ class SfuDownstream {
 }
 
 interface Upstream {
-  consumer: MsWebrtcConsumer;
+  consumer: UpstreamConsumer;
   tracks: MediaStreamTrack[];
   downstreams: Map<string, SfuDownstream>;
 }
@@ -116,22 +122,31 @@ class PrimeTvSfu {
   private ensureUpstream(eventId: string, getView: () => Promise<PrimeTvView | null>): Upstream {
     let up = this.upstreams.get(eventId);
     if (up) return up;
-    up = { consumer: null as unknown as MsWebrtcConsumer, tracks: [], downstreams: new Map() };
+    up = { consumer: null as unknown as UpstreamConsumer, tracks: [], downstreams: new Map() };
     this.upstreams.set(eventId, up);
-    // Abre o consumer buscando a view (server+msToken) fresca.
-    void (async () => {
-      const view = await getView();
-      if (!view || !this.upstreams.has(eventId)) return;
-      const consumer = new MsWebrtcConsumer({
-        server: view.server,
-        token: view.msToken,
-        tag: eventId,
-        onTracks: (tracks) => this.onUpstreamTracks(eventId, tracks),
-        onClosed: () => this.closeEvent(eventId),
-      });
-      up!.consumer = consumer;
+    const onTracks = (tracks: MediaStreamTrack[]) => this.onUpstreamTracks(eventId, tracks);
+    const onClosed = () => this.closeEvent(eventId);
+    if (USE_AIORTC) {
+      // aiortc: recebe getView e renova o msToken sozinho a cada (re)spawn.
+      const consumer = new PyUpstream({ tag: eventId, getView, onTracks, onClosed });
+      up.consumer = consumer;
       consumer.connect();
-    })();
+    } else {
+      // werift (legado): resolve a view uma vez.
+      void (async () => {
+        const view = await getView();
+        if (!view || !this.upstreams.has(eventId)) return;
+        const consumer = new MsWebrtcConsumer({
+          server: view.server,
+          token: view.msToken,
+          tag: eventId,
+          onTracks,
+          onClosed,
+        });
+        up!.consumer = consumer;
+        consumer.connect();
+      })();
+    }
     return up;
   }
 
