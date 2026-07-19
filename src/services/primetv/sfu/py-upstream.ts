@@ -82,6 +82,11 @@ export class PyUpstream {
 
   private async spawn(): Promise<void> {
     if (this.closed) return;
+    if (!fs.existsSync(PY)) {
+      this.log(`python não encontrado em ${PY} (rode: python3 -m venv python/.venv && pip install aiortc websockets pymediasoup)`);
+      this.opts.onClosed();
+      return;
+    }
     const view = await this.opts.getView();
     if (this.closed) return;
     if (!view?.server || !view?.msToken) {

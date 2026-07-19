@@ -3,12 +3,13 @@ module.exports = {
     {
       name: "arbprime_backend",
       script: "dist/index.js", // Ponto de entrada correto
-      node_args: "-r module-alias/register", // Suporte para module-alias
+      // module-alias + heap V8 a 3.5G (o SFU PrimeTV relaya vídeo 3.5Mbps; sobe RSS).
+      node_args: "-r module-alias/register --max-old-space-size=3584",
       exec_mode: "fork", // Executar como um processo único
       instances: 1, // Apenas uma instância do backend
       autorestart: true, // Reinicia automaticamente em caso de falha
       watch: false, // Não assistir mudanças nos arquivos
-      max_memory_restart: "2G", // Reinicia se ultrapassar 2GB de RAM
+      max_memory_restart: "4G", // Reinicia se ultrapassar 4GB de RAM (era 2G)
       env: {
         NODE_ENV: "production", // Garante que sempre rode em produção
         PORT_API: 3000,
