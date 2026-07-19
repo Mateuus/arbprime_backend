@@ -46,6 +46,7 @@ export const serializePlan = (plan: Plan) => {
     isTrial: plan.isTrial,
     isActive: plan.isActive,
     sortOrder: plan.sortOrder,
+    discordRoleId: plan.discordRoleId ?? null,
     createdAt: plan.createdAt,
     updatedAt: plan.updatedAt,
   };

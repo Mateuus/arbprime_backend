@@ -40,6 +40,7 @@ interface PlanBody {
   isTrial?: boolean;
   isActive?: boolean;
   sortOrder?: number;
+  discordRoleId?: string | null;
 }
 
 const normalize = (b: PlanBody, target: Partial<Plan>): void => {
@@ -53,6 +54,11 @@ const normalize = (b: PlanBody, target: Partial<Plan>): void => {
   if (b.isTrial !== undefined) target.isTrial = !!b.isTrial;
   if (b.isActive !== undefined) target.isActive = !!b.isActive;
   if (b.sortOrder !== undefined) target.sortOrder = Math.floor(Number(b.sortOrder) || 0);
+  // Cargo do Discord: string vazia no form significa "sem cargo" => null.
+  if (b.discordRoleId !== undefined) {
+    const raw = (b.discordRoleId ?? '').toString().trim();
+    target.discordRoleId = raw === '' ? null : raw;
+  }
 };
 
 // POST /plans — cria plano. Admin.
@@ -63,7 +69,7 @@ export const createPlan = async (req: FastifyRequest, reply: FastifyReply) => {
   try {
     const plan = repo().create({
       name: '', description: '', price: 0, promotionType: 'none', promotionValue: 0,
-      durationInDays: 30, level: 1, isTrial: false, isActive: true, sortOrder: 0,
+      durationInDays: 30, level: 1, isTrial: false, isActive: true, sortOrder: 0, discordRoleId: null,
     });
     normalize(body, plan);
     const saved = await repo().save(plan);

@@ -1,6 +1,7 @@
 import { FastifyInstance } from "fastify";
 import {
   adminDiscordHealth,
+  adminListGuildRoles,
   adminSyncAllDiscordRoles,
   discordCallback,
   getDiscordStatus,
@@ -24,4 +25,5 @@ export default async function discordRoutes(app: FastifyInstance) {
 
   app.post("/admin/sync-all", admin, adminSyncAllDiscordRoles);
   app.get("/admin/health", admin, adminDiscordHealth);
+  app.get("/admin/roles", admin, adminListGuildRoles);
 }

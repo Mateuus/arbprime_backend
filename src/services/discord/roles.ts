@@ -161,3 +161,40 @@ export function startRoleSync(): void {
   // Primeira passada logo após o boot, dando tempo do gateway ficar pronto.
   setTimeout(() => void syncAllUsers(), 30_000);
 }
+
+export interface GuildRoleOption {
+  id: string;
+  name: string;
+  position: number;
+  color: number;
+  /** false = está acima do bot na hierarquia; ele NÃO consegue aplicar. */
+  assignable: boolean;
+}
+
+/**
+ * Cargos da guild para o seletor do admin, já sabendo quais o bot alcança.
+ *
+ * O Discord só deixa um bot mexer em cargos ABAIXO do seu cargo mais alto —
+ * por isso devolvemos `assignable`, para o admin não amarrar um plano a um
+ * cargo que vai falhar com "Missing Permissions" na hora de aplicar.
+ * Cargos gerenciados por integração (@everyone, cargos de outros bots) ficam
+ * de fora: ninguém pode atribuí-los manualmente.
+ */
+export async function listGuildRoles(): Promise<GuildRoleOption[]> {
+  const guild = await discordBot.getGuild();
+  if (!guild) return [];
+
+  const me = await guild.members.fetchMe();
+  const botTop = me.roles.highest.position;
+
+  return guild.roles.cache
+    .filter((r) => r.id !== guild.id && !r.managed)
+    .map((r) => ({
+      id: r.id,
+      name: r.name,
+      position: r.position,
+      color: r.color,
+      assignable: r.position < botTop,
+    }))
+    .sort((a, b) => b.position - a.position);
+}

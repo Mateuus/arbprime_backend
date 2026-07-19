@@ -13,6 +13,7 @@ import {
   exchangeCode,
   fetchIdentity,
   joinGuild,
+  listGuildRoles,
   readState,
   syncAllUsers,
   syncUserRoles,
@@ -145,6 +146,15 @@ export const adminSyncAllDiscordRoles = async (_req: FastifyRequest, reply: Fast
   }
   const result = await syncAllUsers();
   return reply.send(createResponse(1, "Varredura concluída.", result));
+};
+
+/** GET /discord/admin/roles — cargos da guild p/ o seletor do /admin/plans. */
+export const adminListGuildRoles = async (_req: FastifyRequest, reply: FastifyReply) => {
+  if (!discordBot.isReady()) {
+    return reply.send(createResponse(0, "Bot do Discord offline.", []));
+  }
+  const roles = await listGuildRoles();
+  return reply.send(createResponse(1, "Cargos carregados.", roles));
 };
 
 /** GET /admin/discord/health — diagnóstico da integração (admin). */
