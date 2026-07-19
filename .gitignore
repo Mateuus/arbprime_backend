@@ -15,3 +15,6 @@ logs/
 pm2.log
 .idea/
 .vscode/
+# PrimeTV python sidecar venv (recriado no deploy)
+python/.venv/
+python/__pycache__/

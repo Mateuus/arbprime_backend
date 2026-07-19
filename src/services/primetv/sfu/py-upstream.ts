@@ -1,5 +1,6 @@
 import { spawn, ChildProcess } from "child_process";
 import * as dgram from "dgram";
+import * as fs from "fs";
 import * as path from "path";
 import * as readline from "readline";
 import { MediaStreamTrack, RTCRtpCodecParameters } from "werift";
@@ -25,9 +26,13 @@ export interface PyUpstreamOpts {
   onClosed: () => void;
 }
 
-// cwd = raiz do repo (pm2 roda dist/index.js de lá), tanto em dev quanto em prod.
-const PY = process.env.PRIMETV_PY || path.resolve(process.cwd(), "python/.venv/bin/python");
-const SCRIPT = path.resolve(process.cwd(), "python/primetv_upstream.py");
+// Raiz do repo, robusto ao cwd do pm2: tenta cwd, cai pro __dirname (dist/services/
+// primetv/sfu → sobe 4 = raiz). `python/` fica na raiz do repo, NÃO dentro de dist/.
+const REPO_ROOT = fs.existsSync(path.resolve(process.cwd(), "python/primetv_upstream.py"))
+  ? process.cwd()
+  : path.resolve(__dirname, "../../../..");
+const PY = process.env.PRIMETV_PY || path.resolve(REPO_ROOT, "python/.venv/bin/python");
+const SCRIPT = path.resolve(REPO_ROOT, "python/primetv_upstream.py");
 const ORIGIN = process.env.PRIMETV_PROVIDER_URL || "https://bllsport.com";
 
 // Porta UDP por upstream (localhost). Contador simples numa faixa dedicada.
