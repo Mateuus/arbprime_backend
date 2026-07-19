@@ -4,6 +4,8 @@ import {
   PrimeRadioAdminEvent,
   PrimeRadioListResult,
   PrimeRadioPublicEvent,
+  PrimeRadioStationListen,
+  PrimeRadioStationPublic,
   PrimeRadioStatus,
   PrimeRadioTeam,
 } from "@Interfaces";
@@ -58,6 +60,41 @@ const statusOf = (row: PrimeTvRadioEvent, now: number): PrimeRadioStatus => {
   return "upcoming";
 };
 
+/**
+ * Emissoras do jogo, já ordenadas. O fallback de LEGADO existe pros jogos
+ * criados antes da tabela de stations, que tinham uma URL só no próprio evento:
+ * eles continuam tocando normalmente, aparecendo como uma emissora única.
+ */
+const stationsOf = (row: PrimeTvRadioEvent): PrimeRadioStationListen[] => {
+  const rows = (row.stations || []).filter((st) => st.isActive);
+  if (rows.length) {
+    return rows
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
+      .map((st) => ({
+        id: st.id,
+        name: st.name,
+        city: st.city || null,
+        logoUrl: st.logoUrl || null,
+        streamUrl: st.streamUrl,
+      }));
+  }
+  if (row.streamUrl) {
+    return [{
+      id: row.id,
+      name: row.station || "Transmissão",
+      city: null,
+      logoUrl: null,
+      streamUrl: row.streamUrl,
+    }];
+  }
+  return [];
+};
+
+/** Tira a URL — o que pode ir pra lista pública. */
+const hideUrl = (st: PrimeRadioStationListen): PrimeRadioStationPublic => ({
+  id: st.id, name: st.name, city: st.city, logoUrl: st.logoUrl,
+});
+
 const toPublic = (row: PrimeTvRadioEvent, now: number): PrimeRadioPublicEvent => {
   const status = statusOf(row, now);
   const isVersus = !!(row.homeName && row.awayName);
@@ -78,6 +115,7 @@ const toPublic = (row: PrimeTvRadioEvent, now: number): PrimeRadioPublicEvent =>
     status,
     isLive: status === "live",
     station: row.station || null,
+    stations: stationsOf(row).map(hideUrl),
   };
 };
 
@@ -94,7 +132,7 @@ const LIVE_FIRST = (a: PrimeRadioPublicEvent, b: PrimeRadioPublicEvent): number 
  * pela mão do admin). Sem `streamUrl`.
  */
 export const listPublic = async (): Promise<PrimeRadioListResult> => {
-  const rows = await repo().find({ where: { isActive: true }, order: { startTime: "ASC" } });
+  const rows = await repo().find({ where: { isActive: true }, relations: ["stations"], order: { startTime: "ASC" } });
   const now = Date.now();
   const events = rows
     .map((r) => toPublic(r, now))
@@ -122,21 +160,25 @@ export const listPublic = async (): Promise<PrimeRadioListResult> => {
  */
 export const getListen = async (
   id: string,
-): Promise<{ event: PrimeRadioPublicEvent; streamUrl: string } | null> => {
-  const row = await repo().findOneBy({ id });
+): Promise<{ event: PrimeRadioPublicEvent; streamUrl: string | null; stations: PrimeRadioStationListen[] } | null> => {
+  const row = await repo().findOne({ where: { id }, relations: ["stations"] });
   if (!row || !row.isActive) return null;
   const now = Date.now();
   const event = toPublic(row, now);
   if (event.status === "finished") return null;
-  return { event, streamUrl: row.streamUrl };
+  const stations = stationsOf(row);
+  if (!stations.length) return null; // jogo sem emissora não tem o que tocar
+  // `streamUrl` continua saindo p/ não quebrar cliente antigo: é a 1ª emissora.
+  return { event, streamUrl: stations[0].streamUrl, stations };
 };
 
 /** Lista do PAINEL: tudo (inclusive encerrados/inativos) + campos de gestão. */
 export const listAdmin = async (): Promise<PrimeRadioAdminEvent[]> => {
-  const rows = await repo().find({ order: { startTime: "DESC" } });
+  const rows = await repo().find({ relations: ["stations"], order: { startTime: "DESC" } });
   const now = Date.now();
   return rows.map((r) => ({
     ...toPublic(r, now),
+    adminStations: stationsOf(r),
     streamUrl: r.streamUrl,
     isActive: r.isActive,
     endedAt: r.endedAt ? r.endedAt.toISOString() : null,

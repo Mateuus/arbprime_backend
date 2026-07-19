@@ -1,4 +1,5 @@
-import { Entity, PrimaryGeneratedColumn, Column, Index } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, Index, OneToMany } from 'typeorm';
+import { PrimeTvRadioStation } from './PrimeTvRadioStation';
 
 /**
  * Jogo do **PrimeRádio**: transmissão de ÁUDIO (narração) cadastrada à mão pelo
@@ -66,13 +67,17 @@ export class PrimeTvRadioEvent {
     @Column({ type: 'varchar', length: 30 })
     endTime!: string;
 
-    // --- stream ---
-    // URL do áudio (normalmente termina em /stream, mas aceita qualquer formato:
-    // mp3/aac/Icecast/Shoutcast/HLS). Vai DIRETO pro <audio> do cliente.
-    @Column({ type: 'text' })
-    streamUrl!: string;
+    // --- emissoras ---
+    // Um jogo tem N rádios narrando; quem escolhe é o ouvinte (ver PrimeTvRadioStation).
+    @OneToMany(() => PrimeTvRadioStation, (station) => station.event, { cascade: false })
+    stations!: PrimeTvRadioStation[];
 
-    // Nome da rádio/narrador — legenda no card e no player.
+    // ⚠️ LEGADO — versão de uma emissora só, de antes da tabela de stations.
+    // Nada novo grava aqui; o serviço sintetiza uma emissora a partir destes
+    // campos quando o evento antigo não tem nenhuma linha em stations.
+    @Column({ type: 'text', nullable: true })
+    streamUrl!: string | null;
+
     @Column({ type: 'varchar', length: 120, nullable: true })
     station!: string | null;
 

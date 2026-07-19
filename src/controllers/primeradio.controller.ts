@@ -1,6 +1,6 @@
 import { FastifyReply, FastifyRequest } from "fastify";
 import { AppDataSource } from "@Database";
-import { PrimeTvRadioEvent } from "@Entities";
+import { PrimeTvRadioEvent, PrimeTvRadioStation } from "@Entities";
 import { createResponse } from "@utils";
 import { getListen, listAdmin, listPublic } from "../services/primeradio/primeradio.service";
 import { probeStream } from "../services/primeradio/stream-probe";
@@ -13,6 +13,7 @@ import { probeStream } from "../services/primeradio/stream-probe";
  */
 
 const repo = () => AppDataSource.getRepository(PrimeTvRadioEvent);
+const stationRepo = () => AppDataSource.getRepository(PrimeTvRadioStation);
 
 interface RadioBody {
   homeName?: string | null;
@@ -29,7 +30,38 @@ interface RadioBody {
   streamUrl?: string;
   station?: string | null;
   isActive?: boolean;
+  /** Emissoras do jogo. Quando vem, SUBSTITUI a lista inteira. */
+  stations?: StationBody[];
 }
+
+interface StationBody {
+  name?: string | null;
+  streamUrl?: string;
+  city?: string | null;
+  logoUrl?: string | null;
+}
+
+
+/**
+ * Regrava as emissoras do jogo. Semântica de SUBSTITUIÇÃO: o painel manda a
+ * lista inteira como está na tela, então apagar aqui e reinserir mantém o
+ * backend fiel ao que o admin vê — sem precisar rastrear o que ele removeu.
+ */
+const saveStations = async (eventId: string, list: StationBody[]): Promise<void> => {
+  await stationRepo().delete({ eventId });
+  const rows = list
+    .filter((st) => (st.streamUrl || "").trim())
+    .map((st, i) => stationRepo().create({
+      eventId,
+      name: (st.name || "").trim().slice(0, 140) || "Transmissão",
+      streamUrl: (st.streamUrl || "").trim(),
+      city: str(st.city),
+      logoUrl: str(st.logoUrl),
+      sortOrder: i,
+      isActive: true,
+    }));
+  if (rows.length) await stationRepo().save(rows);
+};
 
 /** minutos padrão de duração quando o admin não manda `endTime`. */
 const DEFAULT_DURATION_MIN = 100;
@@ -72,7 +104,18 @@ const validate = (row: PrimeTvRadioEvent): string | null => {
   if (new Date(row.endTime).getTime() <= new Date(row.startTime).getTime()) {
     return "O término precisa ser depois do início.";
   }
-  if (!row.streamUrl) return "Informe o link do stream da rádio.";
+  return null;
+};
+
+/** Pelo menos uma emissora tem que sobrar — sem isso não há o que tocar. */
+const validateStations = (list: StationBody[] | undefined, row: PrimeTvRadioEvent): string | null => {
+  if (list === undefined) return row.streamUrl ? null : "Informe ao menos uma rádio.";
+  const clean = list.filter((st) => (st.streamUrl || "").trim());
+  if (!clean.length) return "Informe ao menos uma rádio com link.";
+  for (const st of clean) {
+    if (!(st.name || "").trim()) return "Toda rádio precisa de um nome.";
+  }
+
   return null;
 };
 
@@ -127,10 +170,11 @@ export const createPrimeRadioEvent = async (req: FastifyRequest, reply: FastifyR
     if (!row.endTime && row.startTime && !Number.isNaN(new Date(row.startTime).getTime())) {
       row.endTime = addMinutesIso(row.startTime, DEFAULT_DURATION_MIN);
     }
-    const invalid = validate(row);
+    const invalid = validate(row) || validateStations(body.stations, row);
     if (invalid) return reply.code(400).send(createResponse(0, invalid, []));
     row.createdBy = req.userData?.userId || null;
     const saved = await repo().save(row);
+    if (body.stations) await saveStations(saved.id, body.stations);
     return reply.code(201).send(createResponse(1, "Transmissão criada.", saved));
   } catch (error) {
     return reply.code(500).send(
@@ -147,9 +191,11 @@ export const updatePrimeRadioEvent = async (req: FastifyRequest, reply: FastifyR
     const row = await repo().findOneBy({ id });
     if (!row) return reply.code(404).send(createResponse(0, "Transmissão não encontrada.", []));
     normalize(body, row);
-    const invalid = validate(row);
+    const invalid = validate(row) || validateStations(body.stations, row);
     if (invalid) return reply.code(400).send(createResponse(0, invalid, []));
-    return reply.send(createResponse(1, "Transmissão atualizada.", await repo().save(row)));
+    const saved = await repo().save(row);
+    if (body.stations) await saveStations(saved.id, body.stations);
+    return reply.send(createResponse(1, "Transmissão atualizada.", saved));
   } catch (error) {
     return reply.code(500).send(
       createResponse(0, "Erro ao atualizar a transmissão.", { error: (error as Error).message }),
