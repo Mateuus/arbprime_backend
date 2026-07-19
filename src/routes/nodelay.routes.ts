@@ -2,7 +2,7 @@ import { FastifyInstance } from "fastify";
 import {
   listNoDelayBookmakers, listNoDelayAccounts, createNoDelayAccount,
   updateNoDelayAccount, deleteNoDelayAccount, getNoDelayCredentials,
-  saveNoDelaySession, clearNoDelaySession, setNoDelayStatus, saveNoDelayBalance,
+  connectNoDelayAccount, placeNoDelayBet, getAccountBetToken, saveNoDelaySession, clearNoDelaySession, setNoDelayStatus, saveNoDelayBalance,
   listNoDelaySessions, getRogueToken, getAccountRogueToken,
   listNoDelayInstances, getNoDelayInstance, createNoDelayInstance, updateNoDelayInstance, deleteNoDelayInstance,
 } from "@Controllers";
@@ -44,7 +44,13 @@ export default async function noDelayRoutes(app: FastifyInstance) {
   // Token LOGADO da conta p/ o browser apostar direto na rogue (placeBets).
   app.get("/accounts/:id/rogue-token", auth, getAccountRogueToken);
 
-  // O browser reporta o resultado do login/leitura de saldo.
+  // Connect SERVER-SIDE (biahosted/Altenar): o backend loga no BFF da casa.
+  app.post("/accounts/:id/connect", auth, connectNoDelayAccount);
+  // Token da conta p/ o BROWSER apostar direto no betgateway Altenar (client-side).
+  app.get("/accounts/:id/bet-token", auth, getAccountBetToken);
+  // Disparo SERVER-SIDE (biahosted): fallback — hoje o disparo é client-side.
+  app.post("/accounts/:id/bet", auth, placeNoDelayBet);
+  // O browser reporta o resultado do login/leitura de saldo (swarm).
   app.post("/accounts/:id/session", auth, saveNoDelaySession);
   app.delete("/accounts/:id/session", auth, clearNoDelaySession);
   app.post("/accounts/:id/status", auth, setNoDelayStatus);

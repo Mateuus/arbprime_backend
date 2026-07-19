@@ -6,6 +6,8 @@ import { createResponse } from '@utils';
 import { NoDelayAccountStatus } from '../enums/nodelay.enum';
 import { encryptSecret, decryptSecret, isEncryptionConfigured } from '../utils/crypto';
 import { getRogueAnonToken, getRogueLoginToken } from '../services/nodelay/rogue-token.service';
+import { biahostedLogin, biahostedBalance, biahostedSb2Token } from '../services/nodelay/biahosted-login.service';
+import { placeBiahostedBet, deriveBetUrl, deriveAuthUrl, AltenarBetMarket } from '../services/nodelay/biahosted-bet.service';
 
 /**
  * NoDelay — contas conectadas para aposta rápida multi-conta.
@@ -98,6 +100,12 @@ export const getRogueToken = async (req: FastifyRequest, reply: FastifyReply) =>
   try {
     const house = await bookRepo().findOneBy({ slug });
     if (!house || !house.noDelayEnabled) return reply.code(404).send(createResponse(0, 'Casa não liberada no NoDelay.', []));
+    // Rogue/token é SÓ do swarm (fssb). Biahosted (Altenar) lê odds direto do
+    // browser, sem token — sem este guard o mint tentava cycletls no login da
+    // casa e tomava 495 em loop (martelando o /api/sportsbook/auth dela).
+    if (house.noDelayPlatform !== 'swarm') {
+      return reply.code(400).send(createResponse(0, 'Casa não usa rogue token (só plataforma swarm).', []));
+    }
     const site = operatorSiteOf(house);
     if (!site) return reply.code(409).send(createResponse(0, 'Casa sem operador configurado.', []));
     const { token, expiresAt } = await getRogueAnonToken(site);
@@ -222,6 +230,11 @@ export const getAccountRogueToken = async (req: FastifyRequest, reply: FastifyRe
       return reply.code(500).send(createResponse(0, 'Cofre indisponível (INSTANCE_ENC_KEY).', []));
     }
     const house = await bookRepo().findOneBy({ slug: acc.bookmakerSlug });
+    // Rogue token é SÓ swarm. Biahosted (Altenar) aposta com a sessão/JWT própria
+    // (não com rogue token) — sem este guard o mint tentava cycletls e dava 495.
+    if (house && house.noDelayPlatform !== 'swarm') {
+      return reply.code(400).send(createResponse(0, 'Conta não usa rogue token (só plataforma swarm).', []));
+    }
     const site = house ? operatorSiteOf(house) : null;
     if (!site) return reply.code(409).send(createResponse(0, 'Casa da conta sem operador configurado.', []));
     const swarmAuthToken = decryptSecret(acc.encAuthToken);
@@ -265,6 +278,16 @@ export const listNoDelayBookmakers = async (req: FastifyRequest, reply: FastifyR
 
     const data = houses.map((h) => {
       const c = bySlug.get(h.slug);
+      const cfg = h.noDelayConfig;
+      const operator = cfg?.origin || h.url || null;
+      // "Pronta" depende da PLATAFORMA: swarm precisa de WSS+rogue; biahosted
+      // precisa do BFF de login + host de odds Altenar + domain + origin.
+      const ready =
+        h.noDelayPlatform === 'swarm'
+          ? !!(cfg?.wssUrl && cfg?.rogueUrl && operator)
+          : h.noDelayPlatform === 'biahosted'
+            ? !!(cfg?.bffUrl && cfg?.oddsUrl && cfg?.loginDomain && operator)
+            : false;
       return {
         slug: h.slug,
         name: h.name,
@@ -273,19 +296,24 @@ export const listNoDelayBookmakers = async (req: FastifyRequest, reply: FastifyR
         url: h.url,
         platform: h.noDelayPlatform,
         // Só o que o browser precisa para abrir a conexão.
-        wssUrl: h.noDelayConfig?.wssUrl ?? null,
-        origin: h.noDelayConfig?.origin ?? h.url ?? null,
-        siteId: h.noDelayConfig?.siteId ?? null,
-        source: h.noDelayConfig?.source ?? null,
-        language: h.noDelayConfig?.language ?? null,
+        wssUrl: cfg?.wssUrl ?? null,
+        origin: operator,
+        siteId: cfg?.siteId ?? null,
+        source: cfg?.source ?? null,
+        language: cfg?.language ?? null,
         // Rogue/FSB: host das odds e do place (POR CASA) + operador do token.
-        rogueUrl: h.noDelayConfig?.rogueUrl ?? null,
-        operatorSite: h.noDelayConfig?.origin ?? h.url ?? null,
+        rogueUrl: cfg?.rogueUrl ?? null,
+        operatorSite: operator,
+        // biahosted (Altenar): BFF de login + host de odds + place.
+        bffUrl: cfg?.bffUrl ?? null,
+        loginDomain: cfg?.loginDomain ?? null,
+        oddsUrl: cfg?.oddsUrl ?? null,
+        integration: cfg?.integration ?? null,
+        betUrl: cfg?.betUrl ?? null,
         // Radar: o browser monta o iframe, então precisa da chave e da origem.
-        radarProfiles: h.noDelayConfig?.radarProfiles ?? null,
-        radarMapUrl: h.noDelayConfig?.radarMapUrl ?? h.url ?? null,
-        // Casa pronta = plataforma + WSS (conta) + rogueUrl (odds/place) + operador.
-        ready: !!(h.noDelayPlatform && h.noDelayConfig?.wssUrl && h.noDelayConfig?.rogueUrl && (h.noDelayConfig?.origin || h.url)),
+        radarProfiles: cfg?.radarProfiles ?? null,
+        radarMapUrl: cfg?.radarMapUrl ?? h.url ?? null,
+        ready,
         accountsCount: c ? Number(c.total) : 0,
         connectedCount: c ? Number(c.connected) : 0,
       };
@@ -472,6 +500,166 @@ export const listNoDelaySessions = async (req: FastifyRequest, reply: FastifyRep
     return reply.send(createResponse(1, 'Sessões carregadas.', sessions));
   } catch (error) {
     return reply.code(500).send(createResponse(0, 'Erro ao listar as sessões.', { error: (error as Error).message }));
+  }
+};
+
+// POST /nodelay/accounts/:id/connect — LOGIN SERVER-SIDE (biahosted/Altenar).
+// ≠ do swarm (que loga no browser): aqui o BFF exige `Origin` spoofado, que o
+// browser não seta. Lê a credencial do cofre, loga no BFF e salva a sessão
+// (token cifrado + externalUserId + status). Saldo/odds vêm depois.
+export const connectNoDelayAccount = async (req: FastifyRequest, reply: FastifyReply) => {
+  const acc = await findOwned(req, reply);
+  if (!acc) return;
+  try {
+    const house = await bookRepo().findOneBy({ slug: acc.bookmakerSlug });
+    if (!house || !house.noDelayEnabled) {
+      return reply.code(404).send(createResponse(0, 'Casa não liberada no NoDelay.', []));
+    }
+    if (house.noDelayPlatform !== 'biahosted') {
+      return reply.code(400).send(createResponse(0, 'Esta casa conecta pelo navegador (swarm), não pelo servidor.', []));
+    }
+    const cfg = house.noDelayConfig || {};
+    const bffUrl = cfg.bffUrl || null;
+    const origin = cfg.origin || house.url || null;
+    const domain = cfg.loginDomain || null;
+    if (!bffUrl || !origin || !domain) {
+      return reply.code(409).send(createResponse(0, 'Casa biahosted sem BFF de login / Origin / domain configurados.', []));
+    }
+    const username = safeDecrypt(acc.encUsername);
+    const password = safeDecrypt(acc.encPassword);
+    if (!username || !password) {
+      return reply.code(409).send(createResponse(0, 'Credenciais ausentes ou ilegíveis. Reedite a conta.', []));
+    }
+
+    acc.status = NoDelayAccountStatus.CONNECTING;
+    await accRepo().save(acc);
+
+    const r = await biahostedLogin({ bffUrl, origin, domain, username, password });
+
+    if (r.twoFactor) {
+      acc.status = NoDelayAccountStatus.MFA_REQUIRED;
+      acc.lastError = 'A casa pediu 2FA (ainda não suportado no NoDelay).';
+      acc.sessionAt = null;
+      await accRepo().save(acc);
+      return reply.code(200).send(createResponse(0, acc.lastError, serializeAccount(acc)));
+    }
+    if (!r.ok || !r.token) {
+      acc.status = NoDelayAccountStatus.LOGIN_FAILED;
+      acc.lastError = r.error || 'Login recusado pela casa.';
+      acc.sessionAt = null;
+      await accRepo().save(acc);
+      return reply.code(200).send(createResponse(0, acc.lastError, serializeAccount(acc)));
+    }
+
+    // Sucesso: guarda o JWT (pras odds do Altenar) em encAuthToken e o sessionId
+    // (= `sessionid` do BFF, auth do saldo/perfil) em encJweToken.
+    acc.encAuthToken = encryptSecret(r.token);
+    acc.encJweToken = r.sessionId ? encryptSecret(r.sessionId) : null;
+    acc.externalUserId = r.externalUserId;
+    acc.sessionAt = new Date();
+    acc.status = NoDelayAccountStatus.CONNECTED;
+    acc.lastError = null;
+
+    // Saldo (best-effort): header `sessionid` = sessionId do login. Não derruba o
+    // connect se falhar — a conta fica conectada e o saldo entra no próximo refresh.
+    if (r.sessionId) {
+      try {
+        const bal = await biahostedBalance({ bffUrl, origin, sessionId: r.sessionId });
+        if (bal.ok && bal.balance != null) {
+          acc.balance = bal.balance.toFixed(2);
+          acc.currency = bal.currency || acc.currency;
+          acc.balanceAt = new Date();
+        }
+      } catch { /* best-effort */ }
+    }
+    await accRepo().save(acc);
+    return reply.send(createResponse(1, 'Conta conectada.', serializeAccount(acc)));
+  } catch (error) {
+    try {
+      acc.status = NoDelayAccountStatus.LOGIN_FAILED;
+      acc.lastError = ((error as Error).message || 'Falha ao conectar.').slice(0, 200);
+      acc.sessionAt = null;
+      await accRepo().save(acc);
+    } catch { /* ignora */ }
+    return reply.code(502).send(createResponse(0, 'Falha ao conectar na casa.', { error: (error as Error).message }));
+  }
+};
+
+// GET /nodelay/accounts/:id/bet-token — JWT da conta biahosted p/ o BROWSER
+// apostar DIRETO no betgateway Altenar (igual o rogue-token do fssb). O disparo
+// é client-side: só o browser real passa o WAF nginx do gateway (o server-side
+// tomava 403). Devolve o token da sessão (encAuthToken) em claro pro dono.
+export const getAccountBetToken = async (req: FastifyRequest, reply: FastifyReply) => {
+  const acc = await findOwned(req, reply);
+  if (!acc) return;
+  const house = await bookRepo().findOneBy({ slug: acc.bookmakerSlug });
+  if (!house || house.noDelayPlatform !== 'biahosted') {
+    return reply.code(400).send(createResponse(0, 'Token de aposta só p/ biahosted (Altenar).', []));
+  }
+  if (!acc.encAuthToken) {
+    return reply.code(409).send(createResponse(0, 'Conta sem sessão. Conecte antes de apostar.', []));
+  }
+  // token = JWT do login (p/ o Identity do openSportsBook); sessionId (data.id) =
+  // Sessionid do openSportsBook. O browser faz a cadeia → SB2 token → placeWidget.
+  const token = safeDecrypt(acc.encAuthToken);
+  const sessionId = safeDecrypt(acc.encJweToken);
+  if (!token || !sessionId) return reply.code(409).send(createResponse(0, 'Sessão ilegível. Reconecte a conta.', []));
+  return reply.send(createResponse(1, 'Token de aposta.', { token, sessionId }));
+};
+
+// POST /nodelay/accounts/:id/bet — DISPARO server-side (fallback; hoje o disparo
+// biahosted é CLIENT-SIDE via bet-token, pois o browser real passa o WAF do
+// gateway). Mantido caso um gateway aceite server-side no futuro.
+export const placeNoDelayBet = async (req: FastifyRequest, reply: FastifyReply) => {
+  const acc = await findOwned(req, reply);
+  if (!acc) return;
+  try {
+    const house = await bookRepo().findOneBy({ slug: acc.bookmakerSlug });
+    if (!house || !house.noDelayEnabled) {
+      return reply.code(404).send(createResponse(0, 'Casa não liberada no NoDelay.', []));
+    }
+    if (house.noDelayPlatform !== 'biahosted') {
+      return reply.code(400).send(createResponse(0, 'Disparo server-side só p/ biahosted (Altenar).', []));
+    }
+    if (!acc.encAuthToken) {
+      return reply.code(409).send(createResponse(0, 'Conta sem sessão. Conecte antes de apostar.', []));
+    }
+    const cfg = house.noDelayConfig || {};
+    const origin = cfg.origin || house.url || null;
+    const integration = cfg.integration || house.slug;
+    const betUrl = deriveBetUrl(cfg.oddsUrl, cfg.betUrl);
+    if (!origin || !betUrl) {
+      return reply.code(409).send(createResponse(0, 'Casa biahosted sem Origin / gateway de apostas.', []));
+    }
+    const body = (req.body || {}) as { stake?: number; market?: AltenarBetMarket };
+    const stake = Number(body.stake);
+    const market = body.market;
+    if (!Number.isFinite(stake) || stake <= 0) {
+      return reply.code(400).send(createResponse(0, "Campo 'stake' inválido.", []));
+    }
+    if (!market || !market.eventId || !market.selection?.selectionId) {
+      return reply.code(400).send(createResponse(0, 'Ticket incompleto (market/selection).', []));
+    }
+    // O placeWidget NÃO usa o JWT do login — usa um SB2 token do Altenar. Cadeia:
+    // openSportsBook (Identity=JWT + Sessionid=data.id) → authToken → SignIn → SB2.
+    const jwt = safeDecrypt(acc.encAuthToken);
+    const sessionId = safeDecrypt(acc.encJweToken);
+    const authUrl = deriveAuthUrl(cfg.oddsUrl);
+    if (!cfg.bffUrl || !authUrl || !sessionId) {
+      return reply.code(409).send(createResponse(0, 'Casa biahosted sem bffUrl/oddsUrl ou conta sem sessionId — reconecte.', []));
+    }
+    const sb2 = await biahostedSb2Token({ bffUrl: cfg.bffUrl, origin, authUrl, jwt, sessionId, integration });
+    console.log(`[nodelay/bet] acc=${acc.id} sb2Token=${sb2.ok ? 'OK' : 'FALHOU: ' + sb2.error} stake=${stake} market=${JSON.stringify(market)}`);
+    if (!sb2.ok || !sb2.accessToken) {
+      return reply.code(200).send(createResponse(0, sb2.error || 'Não foi possível autenticar no Altenar. Reconecte a conta.', []));
+    }
+    const r = await placeBiahostedBet({ betUrl, origin, token: sb2.accessToken, integration, stake, market });
+    console.log(`[nodelay/bet] resultado ok=${r.ok} betId=${r.betId} error=${r.error ?? '-'} raw=${JSON.stringify(r.raw)?.slice(0, 300)}`);
+    // ok:false = recusa da casa (200 com o motivo); erro de rede/exceção = 502.
+    if (!r.ok) return reply.code(200).send(createResponse(0, r.error || 'Aposta recusada pela casa.', r));
+    return reply.send(createResponse(1, 'Aposta feita.', r));
+  } catch (error) {
+    return reply.code(502).send(createResponse(0, 'Falha ao apostar na casa.', { error: (error as Error).message }));
   }
 };
 

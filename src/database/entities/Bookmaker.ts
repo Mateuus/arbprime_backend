@@ -27,6 +27,21 @@ export interface NoDelayBookmakerConfig {
   /** swarm: idioma da sessão (padrão 'pt-br'). */
   language?: string | null;
 
+  // ---- biahosted (login por BFF HTTP; cotações Altenar) ----
+  /** biahosted: base do BFF de login da casa (ex.: 'https://bff-estrelabet.estrelabet.bet.br'). */
+  bffUrl?: string | null;
+  /** biahosted: valor do campo `domain` no corpo do login (ex.: 'www.estrelabet.bet.br').
+   *  O header `Origin` reusa o `origin` acima (ex.: 'https://www.estrelabet.bet.br'). */
+  loginDomain?: string | null;
+  /** biahosted: host da API de odds Altenar (ex.: 'https://sb2frontend-altenar2.biahosted.com').
+   *  É o análogo do `rogueUrl` do swarm — as odds saem daqui, com Origin + token. */
+  oddsUrl?: string | null;
+  /** biahosted: nome da integração Altenar no body do place (ex.: 'estrelabet'). Por casa. */
+  integration?: string | null;
+  /** biahosted: host do gateway de APOSTAS Altenar (ex.: 'https://sb2betgateway-altenar2.biahosted.com').
+   *  ⚠️ subdomain DIFERENTE do oddsUrl (frontend→betgateway). Vazio ⇒ deriva do oddsUrl. */
+  betUrl?: string | null;
+
   // ---- radar (widget de acompanhamento ao vivo) ----
   /**
    * Chave de assinatura do widget, POR ESPORTE (`{"default":"…","2":"…"}` —

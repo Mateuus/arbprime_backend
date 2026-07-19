@@ -15,6 +15,13 @@
 export enum NoDelayPlatform {
   /** WebSocket estilo BetConstruct/swarm (FssBio): wss://swarm.<casa>/ */
   SWARM = 'swarm',
+  /**
+   * Cotações via BetConstruct/biahosted; login POR CASA num BFF HTTP próprio
+   * (ex.: estrelabet: POST bff-estrelabet.estrelabet.bet.br/login → JWT 1h).
+   * O login exige `Origin` spoofado ⇒ roda no BACKEND (browser não seta Origin),
+   * ≠ do swarm que loga no browser. O endereço (bffUrl/domain) vem do noDelayConfig.
+   */
+  BIAHOSTED = 'biahosted',
 }
 
 /** Estado da sessão da conta na casa. */
