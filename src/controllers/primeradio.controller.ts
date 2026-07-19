@@ -3,6 +3,7 @@ import { AppDataSource } from "@Database";
 import { PrimeTvRadioEvent } from "@Entities";
 import { createResponse } from "@utils";
 import { getListen, listAdmin, listPublic } from "../services/primeradio/primeradio.service";
+import { probeStream } from "../services/primeradio/stream-probe";
 
 /**
  * PrimeRádio — lista pública, escuta (autenticada) e CRUD do painel admin.
@@ -197,6 +198,28 @@ export const deletePrimeRadioEvent = async (req: FastifyRequest, reply: FastifyR
   } catch (error) {
     return reply.code(500).send(
       createResponse(0, "Erro ao remover a transmissão.", { error: (error as Error).message }),
+    );
+  }
+};
+
+/**
+ * POST /primeradio/admin/probe — testa o link antes de salvar.
+ *
+ * Serve pro admin saber se o endereço está no ar e é áudio de verdade; o que a
+ * estação declarar (nome, gênero, ouvintes) vem junto de brinde. Ver o porquê
+ * de não dar pra fazer isso no navegador em services/primeradio/stream-probe.
+ */
+export const probePrimeRadioStream = async (req: FastifyRequest, reply: FastifyReply) => {
+  const { url } = (req.body || {}) as { url?: string };
+  if (!url || typeof url !== "string" || !url.trim()) {
+    return reply.code(400).send(createResponse(0, "Informe a URL do stream.", []));
+  }
+  try {
+    const result = await probeStream(url);
+    return reply.send(createResponse(1, result.ok ? "Stream no ar." : (result.error || "Falhou."), result));
+  } catch (error) {
+    return reply.code(500).send(
+      createResponse(0, "Erro ao testar o stream.", { error: (error as Error).message }),
     );
   }
 };

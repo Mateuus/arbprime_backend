@@ -8,6 +8,7 @@ import {
   endPrimeRadioEvent,
   reopenPrimeRadioEvent,
   deletePrimeRadioEvent,
+  probePrimeRadioStream,
 } from "@Controllers/primeradio.controller";
 import { checkAuth, checkAdmin } from "../middlewares/auth.middleware";
 
@@ -35,4 +36,7 @@ export default async function primeRadioRoutes(app: FastifyInstance) {
   app.post("/admin/events/:id/end", admin, endPrimeRadioEvent);
   app.post("/admin/events/:id/reopen", admin, reopenPrimeRadioEvent);
   app.delete("/admin/events/:id", admin, deletePrimeRadioEvent);
+
+  // Testa um link de stream antes de salvar (o navegador não consegue: CORS)
+  app.post("/admin/probe", admin, probePrimeRadioStream);
 }
