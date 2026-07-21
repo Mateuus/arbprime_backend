@@ -38,6 +38,12 @@ export class OddsCurrent {
   @Column({ type: "decimal", precision: 12, scale: 3, transformer: decimalTransformer })
   price!: number;
 
+  /** Dados apostáveis da seleção (id(s) da casa, linha, limites) — o betslip/place
+   * usa isto. superbet=oddUuid, betano/swarm=selectionId, Altenar=marketId+typeId.
+   * null nas casas ainda não instrumentadas no worker. */
+  @Column({ type: "json", nullable: true })
+  placeable!: Record<string, unknown> | null;
+
   @Column({ name: "event_date", type: "datetime", nullable: true })
   eventDate!: Date | null;
 

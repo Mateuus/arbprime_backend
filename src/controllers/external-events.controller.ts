@@ -670,7 +670,7 @@ export const getEventGroup = async (req: FastifyRequest, reply: FastifyReply) =>
     const marketsMap = new Map<string, {
       marketId: string;
       marketName: string | null;
-      selections: Map<string, { selection: string; handicap: string; prices: Array<{ bookmaker: string; eventId: string; price: number; inverted: boolean; boosted: boolean; pa: boolean; size: number | null }> }>;
+      selections: Map<string, { selection: string; handicap: string; prices: Array<{ bookmaker: string; eventId: string; price: number; inverted: boolean; boosted: boolean; pa: boolean; size: number | null; placeable: Record<string, unknown> | null }> }>;
     }>();
 
     for (const house of houses) {
@@ -697,7 +697,7 @@ export const getEventGroup = async (req: FastifyRequest, reply: FastifyReply) =>
         const boosted = boostedKeys.has(flagKey);
         const pa = paKeys.has(flagKey);
         const size = sizeMap.has(flagKey) ? sizeMap.get(flagKey)! : null;
-        sel.prices.push({ bookmaker: house.bookmaker, eventId: house.eventId, price: o.price, inverted: house.inverted, boosted, pa, size });
+        sel.prices.push({ bookmaker: house.bookmaker, eventId: house.eventId, price: o.price, inverted: house.inverted, boosted, pa, size, placeable: o.placeable ?? null });
       }
     }
 
