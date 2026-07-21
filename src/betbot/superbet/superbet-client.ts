@@ -17,7 +17,22 @@ import { CHROME_UA, Jar } from '../http';
 import { solveWafToken, SUPERBET_ORIGIN } from './superbet-waf';
 
 const API = 'https://api.web.production.betler.superbet.bet.br';
+const OFFER = 'https://production-superbet-offer-br.freetls.fastly.net/v2/pt-BR';
 const CLIENT_SRC = 'Desktop_new';
+
+/** Resultado do submitTicket. */
+export interface SuperbetPlaceResult {
+  ok: boolean;
+  status: number;
+  ticketId?: string;
+  placedOdds: number;
+  stake: number;
+  error?: string;
+  raw?: unknown;
+}
+
+/** struct (nomes de esporte/torneio) cacheado — best-effort, só cosmético no ticket. */
+let structCache: { at: number; sports: Map<string, string>; tournaments: Map<string, string> } | null = null;
 
 export interface SuperbetCredentials { username: string; password: string; }
 
@@ -357,6 +372,96 @@ export class SuperbetClient {
       currency: 'BRL',
       fetchedAt: Date.now(),
     };
+  }
+
+  /** Nomes de esporte/torneio (struct público) — cacheados 5min, best-effort. */
+  private async structNames(): Promise<{ sports: Map<string, string>; tournaments: Map<string, string> }> {
+    if (structCache && Date.now() - structCache.at < 5 * 60_000) return structCache;
+    const empty = { sports: new Map<string, string>(), tournaments: new Map<string, string>() };
+    try {
+      const r = await this.session.request('get', `${OFFER}/struct`, { headers: apiHeaders({}), sendCookies: false });
+      const d = r.json?.data || {};
+      const nm = (arr: any[]): Map<string, string> => {
+        const m = new Map<string, string>();
+        for (const x of arr || []) m.set(String(x.id), String(x.localNames?.['pt-BR'] ?? x.id));
+        return m;
+      };
+      structCache = { at: Date.now(), sports: nm(d.sports), tournaments: nm(d.tournaments) };
+      return structCache;
+    } catch {
+      return empty;
+    }
+  }
+
+  /**
+   * APOSTA (submitTicket) — monta o bilhete a partir das odds PÚBLICAS do evento
+   * (acha a odd por uuid), anexa a sessão + token WAF (o mesmo solver do login) e o
+   * device, e posta em `legacy-web/betting/submitTicket`. Simples (1 seleção).
+   * A sessão precisa estar reidratada (restoreSession) antes.
+   */
+  async placeTicket(p: {
+    eventId: string | number;
+    oddUuid: string;
+    stake: number;
+    betType?: 'prematch' | 'live';
+    autoAccept?: boolean;
+  }): Promise<SuperbetPlaceResult> {
+    // 1) odds públicas do evento → acha a seleção
+    const evRes = await this.session.request('get', `${OFFER}/events/${p.eventId}`, { headers: apiHeaders({}), sendCookies: false });
+    const ev = evRes.json?.data?.[0];
+    if (!ev) throw new SuperbetError('rejected', 'evento sem odds (fechou?)');
+    const odds: any[] = ev.odds || [];
+    const odd = odds.find((o) => o.uuid === p.oddUuid || `${o.marketUuid}:${o.outcomeId}` === p.oddUuid);
+    if (!odd) throw new SuperbetError('rejected', 'seleção indisponível (odd fechou/mudou)');
+
+    const names = await this.structNames();
+    const [t1, t2] = String(ev.matchName || '').split(/\s*·\s*|\s+x\s+|\s+-\s+/);
+    const live = p.betType === 'live';
+
+    const item = {
+      value: String(odd.price),
+      type: 'sport', fix: false,
+      betRadarId: String(ev.betRadarId ?? ''),
+      eventId: ev.eventId, eventUuid: ev.uuid,
+      oddUuid: odd.uuid, uuid: odd.uuid,
+      sourceType: 101, sourceScreen: 100,
+      betGroupId: odd.marketId,
+      eventName: ev.matchName, eventCode: ev.matchCode, live,
+      marketId: odd.marketId, marketName: odd.marketName, marketUuid: odd.marketUuid,
+      matchDate: ev.matchDate, matchDateUtc: ev.utcDate ?? ev.matchDate,
+      matchId: ev.eventId, matchName: ev.matchName,
+      oddCode: String(odd.code ?? ''), oddDescription: String(odd.info ?? ''),
+      oddFullName: String(odd.name ?? ''), oddId: odd.outcomeId, oddName: String(odd.name ?? ''),
+      oddTypeId: odd.outcomeId, rules: [], sbValue: '', selected: true,
+      sportId: ev.sportId, sportName: names.sports.get(String(ev.sportId)) || '',
+      teamId1: String(ev.homeTeamId ?? ''), teamId2: String(ev.awayTeamId ?? ''),
+      teamnameone: (t1 || '').trim(), teamnametwo: (t2 || '').trim(),
+      tournamentId: ev.tournamentId, tournamentName: names.tournaments.get(String(ev.tournamentId)) || '',
+    };
+
+    const body = {
+      ticketOnline: 'online', total: p.stake, betType: p.betType || 'prematch', combs: '',
+      items: [item],
+      clientSourceType: CLIENT_SRC, paymentBonusType: 1, locale: 'pt-BR',
+      requestDetails: { deviceId: this.device.sbDeviceId, isDeviceIdTestFlagOnSubscribed: 'false', isDeviceIdTestFlagOnInitial: 'false' },
+      geoLocation: 'brSaoPaulo', deviceIdentifier: this.device.sbDeviceId,
+      autoAcceptChanges: p.autoAccept === false ? '0' : '1',
+      ticketUuid: randomUUID(),
+    };
+
+    // 2) WAF token (mesmo solver do login) + POST autenticado (cookies da sessão)
+    const wafToken = await solveWafToken(this.session);
+    const r = await this.session.request('post', `${API}/legacy-web/betting/submitTicket?clientSourceType=${CLIENT_SRC}`, {
+      body: JSON.stringify(body),
+      headers: apiHeaders({ 'Content-Type': 'application/json', 'x-aws-waf-token': wafToken, 'sec-fetch-site': 'same-site' }),
+    });
+
+    if (r.status === 401 || r.status === 403) throw new SuperbetError('auth', `place não autenticado (${r.status}) — sessão/WAF`);
+    const j = r.json;
+    const ok = r.status === 200 && !!j && j.error !== true && j.data != null;
+    const ticketId = j?.data?.ticketId ?? j?.data?.uuid ?? j?.data?.ticketUuid;
+    const err = !ok ? (j?.message || j?.data?.message || j?.errorMessage || `submitTicket status ${r.status}`) : undefined;
+    return { ok, status: r.status, ticketId, placedOdds: Number(odd.price) || 0, stake: p.stake, error: err, raw: j ?? r.body?.slice(0, 600) };
   }
 }
 

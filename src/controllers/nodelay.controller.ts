@@ -300,6 +300,8 @@ export const listNoDelayBookmakers = async (req: FastifyRequest, reply: FastifyR
         color: h.color,
         url: h.url,
         platform: h.noDelayPlatform,
+        // Aposta mínima da casa (BRL) — default 1 se não configurada.
+        minStake: cfg?.minStake ?? null,
         // Só o que o browser precisa para abrir a conexão.
         wssUrl: cfg?.wssUrl ?? null,
         origin: operator,
@@ -848,6 +850,53 @@ export const placeNoDelayBet = async (req: FastifyRequest, reply: FastifyReply) 
     return reply.send(createResponse(1, 'Aposta feita.', r));
   } catch (error) {
     return reply.code(502).send(createResponse(0, 'Falha ao apostar na casa.', { error: (error as Error).message }));
+  }
+};
+
+// POST /nodelay/accounts/:id/superbet-bet { eventId, oddUuid, stake, betType?, autoAccept? }
+// Aposta na SUPERBET (submitTicket) — server-side, pois o host betler é WAF e a
+// sessão (cookies+device) mora no cofre. Reidrata a sessão, resolve o WAF e posta.
+export const placeSuperbetBet = async (req: FastifyRequest, reply: FastifyReply) => {
+  const acc = await findOwned(req, reply);
+  if (!acc) return;
+  try {
+    const house = await bookRepo().findOneBy({ slug: acc.bookmakerSlug });
+    if (!house || house.noDelayPlatform !== 'superbet') {
+      return reply.code(400).send(createResponse(0, 'Aposta server-side só p/ Superbet.', []));
+    }
+    if (!acc.encAuthToken) {
+      return reply.code(409).send(createResponse(0, 'Conta sem sessão. Conecte antes de apostar.', []));
+    }
+    const b = (req.body || {}) as { eventId?: string | number; oddUuid?: string; stake?: number; betType?: 'prematch' | 'live'; autoAccept?: boolean };
+    const stake = Number(b.stake);
+    if (!b.eventId || !b.oddUuid) return reply.code(400).send(createResponse(0, 'Ticket incompleto (eventId/oddUuid).', []));
+    if (!Number.isFinite(stake) || stake <= 0) return reply.code(400).send(createResponse(0, "Campo 'stake' inválido.", []));
+
+    let blob: { cookies?: Record<string, string>; device?: SuperbetDevice } = {};
+    try { blob = JSON.parse(safeDecrypt(acc.encAuthToken) || '{}'); } catch { /* ilegível */ }
+    if (!blob.cookies || !blob.cookies['sb-production-token']) {
+      return reply.code(409).send(createResponse(0, 'Sessão Superbet ilegível/incompleta. Reconecte a conta.', []));
+    }
+
+    const client = new SuperbetClient({ device: blob.device, timeoutSec: 30 });
+    client.restoreSession(blob.cookies);
+    const started = Date.now();
+    const r = await client.placeTicket({ eventId: b.eventId, oddUuid: b.oddUuid, stake, betType: b.betType || 'prematch', autoAccept: b.autoAccept });
+    const elapsedMs = Date.now() - started;
+    console.log(`[nodelay/superbet-bet] acc=${acc.id} ok=${r.ok} status=${r.status} stake=${stake} odds=${r.placedOdds} ticket=${r.ticketId ?? '-'} err=${r.error ?? '-'}`);
+
+    // Persiste cookies atualizados (mantém a sessão fresca) — best-effort.
+    try {
+      const sess = client.exportSession();
+      acc.encAuthToken = encryptSecret(JSON.stringify({ cookies: sess.cookies, device: sess.device, expiresAt: sess.expiresAt }));
+      await accRepo().save(acc);
+    } catch { /* ignora */ }
+    await client.close().catch(() => {});
+
+    if (!r.ok) return reply.code(200).send(createResponse(0, r.error || 'Aposta recusada pela Superbet.', { ...r, elapsedMs }));
+    return reply.send(createResponse(1, 'Aposta feita.', { ...r, elapsedMs }));
+  } catch (error) {
+    return reply.code(502).send(createResponse(0, 'Falha ao apostar na Superbet.', { error: (error as Error).message }));
   }
 };
 

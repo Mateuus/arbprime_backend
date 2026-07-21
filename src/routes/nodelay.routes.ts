@@ -2,7 +2,7 @@ import { FastifyInstance } from "fastify";
 import {
   listNoDelayBookmakers, listNoDelayAccounts, createNoDelayAccount,
   updateNoDelayAccount, deleteNoDelayAccount, getNoDelayCredentials,
-  connectNoDelayAccount, completeSuperbetMfa, getSuperbetFaceidStatus, placeNoDelayBet, getAccountBetToken, saveNoDelaySession, clearNoDelaySession, setNoDelayStatus, saveNoDelayBalance,
+  connectNoDelayAccount, completeSuperbetMfa, getSuperbetFaceidStatus, placeNoDelayBet, placeSuperbetBet, getAccountBetToken, saveNoDelaySession, clearNoDelaySession, setNoDelayStatus, saveNoDelayBalance,
   listNoDelaySessions, getRogueToken, getAccountRogueToken,
   listNoDelayInstances, getNoDelayInstance, createNoDelayInstance, updateNoDelayInstance, deleteNoDelayInstance,
 } from "@Controllers";
@@ -52,6 +52,7 @@ export default async function noDelayRoutes(app: FastifyInstance) {
   app.get("/accounts/:id/bet-token", auth, getAccountBetToken);
   // Disparo SERVER-SIDE (biahosted): fallback — hoje o disparo é client-side.
   app.post("/accounts/:id/bet", auth, placeNoDelayBet);
+  app.post("/accounts/:id/superbet-bet", auth, placeSuperbetBet);
   // O browser reporta o resultado do login/leitura de saldo (swarm).
   app.post("/accounts/:id/session", auth, saveNoDelaySession);
   app.delete("/accounts/:id/session", auth, clearNoDelaySession);

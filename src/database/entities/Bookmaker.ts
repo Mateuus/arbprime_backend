@@ -13,6 +13,8 @@ import {
  * por isso o endereço mora aqui (admin), não no código.
  */
 export interface NoDelayBookmakerConfig {
+  /** Aposta mínima da casa em BRL (ex.: Superbet 0.50, maioria 1.00). Default 1. */
+  minStake?: number | null;
   /** Endpoint do WebSocket de login (ex.: 'wss://swarm.7games.bet.br/'). */
   wssUrl?: string | null;
   /** Origin/operador enviado no handshake do WSS e no mint de token (ex.: 'https://7games.bet.br'). */
