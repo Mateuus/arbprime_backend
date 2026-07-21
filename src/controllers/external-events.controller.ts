@@ -589,8 +589,32 @@ export const getEventGroup = async (req: FastifyRequest, reply: FastifyReply) =>
     const member = await memberRepo.findOne({ where: { bookmaker, eventId } });
 
     const lr = await loadLeagueResolver();
-    let event: { sport: string; home: string; away: string; eventDate: Date | null; league: string | null; country: string | null; countryKey: string | null };
+    let event: { sport: string; home: string; away: string; eventDate: Date | null; league: string | null; country: string | null; countryKey: string | null; homeSofaId: string | null; awaySofaId: string | null };
     let houses: GroupedHouse[];
+
+    // sofascore_id (crest) do time canônico, via team_sofascore (best-effort). Resolve
+    // pelo team_id do grupo QUANDO existe; senão pelo NOME (canonical_norm) — muitos
+    // grupos não têm home_team_id/away_team_id carimbado pelo matcher, mas o time pode
+    // estar na tabela `teams` + mapeado, então o fallback por nome recupera o escudo.
+    const resolveSofa = async (teamId: string | null, name: string): Promise<string | null> => {
+      try {
+        if (teamId) {
+          const r: Array<{ sofascore_id: string }> = await ExternalDataSource.query(
+            `SELECT sofascore_id FROM team_sofascore WHERE team_id = ? LIMIT 1`, [teamId]);
+          if (r[0]?.sofascore_id != null) return String(r[0].sofascore_id);
+        }
+        const nrm = normalizeName(name || "");
+        if (!nrm) return null;
+        const r2: Array<{ sofascore_id: string }> = await ExternalDataSource.query(
+          `SELECT ts.sofascore_id FROM teams t JOIN team_sofascore ts ON ts.team_id = t.id
+             WHERE t.canonical_norm = ? AND t.sport = 'futebol' LIMIT 1`, [nrm]);
+        return r2[0]?.sofascore_id != null ? String(r2[0].sofascore_id) : null;
+      } catch { return null; }
+    };
+    const sofaOf = async (homeTeamId: string | null, awayTeamId: string | null, homeName: string, awayName: string): Promise<{ home: string | null; away: string | null }> => {
+      const [home, away] = await Promise.all([resolveSofa(homeTeamId, homeName), resolveSofa(awayTeamId, awayName)]);
+      return { home, away };
+    };
 
     if (member) {
       const group = await ExternalDataSource.getRepository(EventGroup).findOne({ where: { id: member.groupId } });
@@ -599,6 +623,7 @@ export const getEventGroup = async (req: FastifyRequest, reply: FastifyReply) =>
       const lid = lr.resolve(group.sport, "", group.league, group.leagueId);
       const meta = lid ? lr.metaById.get(lid) : null;
       const ck = meta?.countryKey ?? null;
+      const sofa = await sofaOf(group.homeTeamId, group.awayTeamId, group.canonicalHome, group.canonicalAway);
       event = {
         sport: group.sport,
         home: group.canonicalHome,
@@ -606,7 +631,9 @@ export const getEventGroup = async (req: FastifyRequest, reply: FastifyReply) =>
         eventDate: group.eventDate,
         league: meta?.canonicalName ?? group.league,
         country: ck ? (meta?.country ?? null) : null,
-        countryKey: ck
+        countryKey: ck,
+        homeSofaId: sofa.home,
+        awaySofaId: sofa.away
       };
       houses = members.map(memberToHouse);
     } else {
@@ -615,6 +642,7 @@ export const getEventGroup = async (req: FastifyRequest, reply: FastifyReply) =>
       const lid = lr.resolve(ev.sport, ev.bookmaker, ev.league || ev.leagueName, null);
       const meta = lid ? lr.metaById.get(lid) : null;
       const ck = meta?.countryKey ?? null;
+      const sofa = await sofaOf(null, null, ev.home, ev.away);
       event = {
         sport: ev.sport,
         home: ev.home,
@@ -622,7 +650,9 @@ export const getEventGroup = async (req: FastifyRequest, reply: FastifyReply) =>
         eventDate: ev.eventDate,
         league: meta?.canonicalName ?? (ev.league || ev.leagueName),
         country: ck ? (meta?.country ?? null) : null,
-        countryKey: ck
+        countryKey: ck,
+        homeSofaId: sofa.home,
+        awaySofaId: sofa.away
       };
       houses = [{ bookmaker: ev.bookmaker, eventId: ev.eventId, home: ev.home, away: ev.away, inverted: false, link: ev.link }];
     }
