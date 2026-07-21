@@ -22,6 +22,14 @@ export enum NoDelayPlatform {
    * ≠ do swarm que loga no browser. O endereço (bffUrl/domain) vem do noDelayConfig.
    */
   BIAHOSTED = 'biahosted',
+  /**
+   * Superbet (plataforma Betler). Login 100% cycletls no BACKEND (passa o AWS WAF
+   * NetworkBandwidth sem browser — ver betbot/superbet). Sessão = cookies
+   * sb-production-token + ct-prod-bcknd (~2-16h) + device estável (trust de MFA
+   * ~1 semana). Pode exigir MFA (SMS/faceid) → status MFA_REQUIRED. Sem endpoint;
+   * origin/WAF host são fixos no serviço (não vêm do noDelayConfig).
+   */
+  SUPERBET = 'superbet',
 }
 
 /** Estado da sessão da conta na casa. */

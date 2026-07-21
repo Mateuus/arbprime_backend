@@ -2,9 +2,12 @@ import { FastifyRequest, FastifyReply } from "fastify";
 import { ExternalWriteDataSource, ensureExternalWriteDb } from "../database/external-write-data-source";
 import { Team } from "../database/external/team.entity";
 import { TeamAlias } from "../database/external/team-alias.entity";
+import { TeamSofascore } from "../database/external/team-sofascore.entity";
 import { createResponse } from "@utils/resFormatter";
 import { normalizeName } from "@utils/functions";
 import { rebuildTeamAliasCache } from "@Core/teamAliasCache";
+import { CycleSession } from "../betbot/cycle-session";
+import { sofascoreSearchTeams, pickBestMatch } from "../services/sofascore.service";
 
 /**
  * CURADORIA de Times & Aliases (tabelas `teams` / `team_aliases` do
@@ -67,6 +70,19 @@ async function safeRebuild(): Promise<void> {
 
 const teamRepo = () => ExternalWriteDataSource.getRepository(Team);
 const aliasRepo = () => ExternalWriteDataSource.getRepository(TeamAlias);
+const sofaRepo = () => ExternalWriteDataSource.getRepository(TeamSofascore);
+
+/** Mapa teamId → sofascoreId p/ um conjunto de times (1 query). */
+async function getSofaMap(teamIds: string[]): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  if (teamIds.length === 0) return out;
+  const rows = await sofaRepo()
+    .createQueryBuilder("s")
+    .where("s.teamId IN (:...ids)", { ids: teamIds })
+    .getMany();
+  for (const r of rows) out[String(r.teamId)] = String(r.sofascoreId);
+  return out;
+}
 
 // GET /teams?search=&sport=&category=&page=&limit= — lista paginada de times
 // (com contagem de aliases). Envelope de paginação no mesmo padrão de /external/events.
@@ -104,7 +120,8 @@ export const listTeams = async (req: FastifyRequest, reply: FastifyReply) => {
       for (const r of rows) countMap[String(r.teamId)] = Number(r.cnt);
     }
 
-    const data = teams.map((t) => ({ ...t, aliasCount: countMap[String(t.id)] || 0 }));
+    const sofaMap = await getSofaMap(teams.map((t) => t.id));
+    const data = teams.map((t) => ({ ...t, aliasCount: countMap[String(t.id)] || 0, sofascoreId: sofaMap[String(t.id)] ?? null }));
     const totalPages = Math.max(1, Math.ceil(total / limitNum));
     return reply.send(createResponse(1, "Times carregados.", {
       teams: data,
@@ -127,7 +144,8 @@ export const getTeam = async (req: FastifyRequest, reply: FastifyReply) => {
     const team = await teamRepo().findOneBy({ id });
     if (!team) return reply.code(404).send(createResponse(0, "Time não encontrado.", []));
     const aliases = await aliasRepo().find({ where: { teamId: id }, order: { alias: "ASC" } });
-    return reply.send(createResponse(1, "Time carregado.", { ...team, aliases }));
+    const sofa = await sofaRepo().findOneBy({ teamId: id });
+    return reply.send(createResponse(1, "Time carregado.", { ...team, aliases, sofascoreId: sofa ? String(sofa.sofascoreId) : null }));
   } catch (error) {
     return reply.code(500).send(createResponse(0, "Erro ao carregar time.", { error: (error as Error).message }));
   }
@@ -178,7 +196,7 @@ export const createTeam = async (req: FastifyRequest, reply: FastifyReply) => {
 export const updateTeam = async (req: FastifyRequest, reply: FastifyReply) => {
   if (!(await withWriteDb(reply))) return;
   const { id } = req.params as { id: string };
-  const body = (req.body || {}) as { canonicalName?: string; country?: string; status?: string; category?: string };
+  const body = (req.body || {}) as { canonicalName?: string; country?: string; status?: string; category?: string; sofascoreId?: string | number | null };
 
   try {
     const team = await teamRepo().findOneBy({ id });
@@ -193,6 +211,17 @@ export const updateTeam = async (req: FastifyRequest, reply: FastifyReply) => {
     }
     if (typeof body.country === "string") team.country = body.country.trim() || null;
     if (typeof body.status === "string" && VALID_STATUS.includes(body.status)) team.status = body.status;
+    // sofascoreId (tabela separada team_sofascore): 'set' com dígitos, 'clear' com null/'',
+    // 'skip' se não veio no body. Aplicado na transação abaixo.
+    let sofaOp: { kind: "set"; id: string } | { kind: "clear" } | null = null;
+    if (body.sofascoreId !== undefined) {
+      if (body.sofascoreId === null || body.sofascoreId === "") sofaOp = { kind: "clear" };
+      else {
+        const sid = String(body.sofascoreId).trim();
+        if (!/^\d+$/.test(sid)) return reply.code(400).send(createResponse(0, "sofascoreId inválido (apenas dígitos).", []));
+        sofaOp = { kind: "set", id: sid };
+      }
+    }
 
     let newCategory: string | null = null;
     if (typeof body.category === "string" && body.category.trim()) {
@@ -208,10 +237,17 @@ export const updateTeam = async (req: FastifyRequest, reply: FastifyReply) => {
       if (newCategory) {
         await em.getRepository(TeamAlias).update({ teamId: id }, { category: newCategory, updatedAt: new Date() });
       }
+      // sofascoreId no mapa separado (upsert/delete).
+      if (sofaOp?.kind === "set") {
+        await em.getRepository(TeamSofascore).save(em.getRepository(TeamSofascore).create({ teamId: id, sofascoreId: sofaOp.id, updatedAt: new Date() }));
+      } else if (sofaOp?.kind === "clear") {
+        await em.getRepository(TeamSofascore).delete({ teamId: id });
+      }
     });
     await safeRebuild();
     const aliases = await aliasRepo().find({ where: { teamId: id }, order: { alias: "ASC" } });
-    return reply.send(createResponse(1, "Time atualizado.", { ...team, aliases }));
+    const sofa = await sofaRepo().findOneBy({ teamId: id });
+    return reply.send(createResponse(1, "Time atualizado.", { ...team, aliases, sofascoreId: sofa ? String(sofa.sofascoreId) : null }));
   } catch (error) {
     if (isDup(error)) return reply.code(409).send(createResponse(0, "Conflito: já existe um time/alias com esse nome nessa categoria.", []));
     return reply.code(500).send(createResponse(0, "Erro ao atualizar time.", { error: (error as Error).message }));
@@ -353,5 +389,86 @@ export const mergeTeams = async (req: FastifyRequest, reply: FastifyReply) => {
   } catch (error) {
     if (isDup(error)) return reply.code(409).send(createResponse(0, "Conflito de alias ao fundir os times.", []));
     return reply.code(500).send(createResponse(0, "Erro ao fundir times.", { error: (error as Error).message }));
+  }
+};
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// GET /teams/sofascore/search?q= — candidatos do SoFaScore (via cycletls) p/ o admin
+// ESCOLHER manualmente no dashboard. Não persiste nada aqui.
+export const searchSofascore = async (req: FastifyRequest, reply: FastifyReply) => {
+  const { q = "" } = req.query as Record<string, string>;
+  if (!q.trim()) return reply.code(400).send(createResponse(0, "Informe 'q' (nome do time).", []));
+  try {
+    const candidates = await sofascoreSearchTeams(q);
+    return reply.send(createResponse(1, `${candidates.length} candidato(s).`, { candidates }));
+  } catch (error) {
+    return reply.code(502).send(createResponse(0, "Falha ao consultar o SoFaScore.", { error: (error as Error).message }));
+  }
+};
+
+// POST /teams/sofascore/backfill { limit?, commit?, minConfidence?, sport? }
+// Busca EM LOTE (ação do admin, NÃO runtime) os times SEM sofascore_id e, quando
+// `commit`, grava os matches de alta confiança. Sempre devolve o relatório p/ revisão.
+// Reusa UMA CycleSession e rate-limita (gentil com o Cloudflare do SoFaScore).
+export const backfillSofascore = async (req: FastifyRequest, reply: FastifyReply) => {
+  if (!(await withWriteDb(reply))) return;
+  const body = (req.body || {}) as { limit?: number; commit?: boolean; minConfidence?: number; sport?: string };
+  const limit = Math.min(300, Math.max(1, Number(body.limit) || 50));
+  const commit = body.commit === true;
+  const minConfidence = Math.max(0, Math.min(100, Number.isFinite(body.minConfidence) ? Number(body.minConfidence) : 85));
+  const sport = normalizeSport(body.sport);
+
+  try {
+    // Times SEM mapeamento (left join em team_sofascore → s.team_id IS NULL).
+    const teams = await teamRepo().createQueryBuilder("t")
+      .leftJoin(TeamSofascore, "s", "s.teamId = t.id")
+      .where("s.teamId IS NULL")
+      .andWhere("t.sport = :sport", { sport })
+      .orderBy("t.canonicalName", "ASC")
+      .take(limit)
+      .getMany();
+    if (teams.length === 0) {
+      return reply.send(createResponse(1, "Nenhum time sem sofascoreId nesse filtro.", { commit, minConfidence, results: [] }));
+    }
+
+    const session = new CycleSession({ timeoutSec: 20 });
+    const results: Array<Record<string, unknown>> = [];
+    let committed = 0;
+    try {
+      for (const t of teams) {
+        let matched: Record<string, unknown> | null = null;
+        let saved = false;
+        try {
+          const candidates = await sofascoreSearchTeams(t.canonicalName, session);
+          const best = pickBestMatch(
+            { canonicalName: t.canonicalName, canonicalNorm: t.canonicalNorm, sport: t.sport, category: t.category, country: t.country },
+            candidates,
+            normalizeName,
+          );
+          if (best) {
+            matched = {
+              sofascoreId: best.candidate.sofascoreId, name: best.candidate.name, country: best.candidate.country,
+              confidence: best.confidence, reason: best.reason, logoUrl: best.candidate.logoUrl,
+            };
+            if (commit && best.confidence >= minConfidence) {
+              await sofaRepo().save(sofaRepo().create({ teamId: t.id, sofascoreId: String(best.candidate.sofascoreId), updatedAt: new Date() }));
+              saved = true;
+              committed++;
+            }
+          }
+        } catch (e) {
+          matched = { error: (e as Error).message };
+        }
+        results.push({ teamId: t.id, name: t.canonicalName, category: t.category, matched, saved });
+        await sleep(350); // rate-limit gentil
+      }
+    } finally {
+      await session.close();
+    }
+    // sofascoreId não afeta o cache de aliases do matcher → sem rebuild.
+    return reply.send(createResponse(1, `Backfill: ${results.length} verificados, ${committed} gravados.`, { commit, minConfidence, sport, results }));
+  } catch (error) {
+    return reply.code(500).send(createResponse(0, "Erro no backfill do SoFaScore.", { error: (error as Error).message }));
   }
 };

@@ -7,6 +7,7 @@ import { League } from "./external/league.entity";
 import { LeagueAlias } from "./external/league-alias.entity";
 import { BookmakerMarketName } from "./external/bookmaker-market-name.entity";
 import { Proxy } from "./external/proxy.entity";
+import { TeamSofascore } from "./external/team-sofascore.entity";
 
 /**
  * DataSource SECUNDÁRIA, GRAVÁVEL, apontando para o MySQL do arbbetting_master.
@@ -41,12 +42,27 @@ export const ExternalWriteDataSource = new DataSource({
   database: databaseName,
   synchronize: false,
   logging: false,
-  entities: [Team, TeamAlias, League, LeagueAlias, BookmakerMarketName, Proxy],
+  entities: [Team, TeamAlias, League, LeagueAlias, BookmakerMarketName, Proxy, TeamSofascore],
   subscribers: [],
   migrations: []
 });
 
 let initPromise: Promise<DataSource> | null = null;
+
+/**
+ * Cria a `team_sofascore` se não existir (synchronize:false → não é automático).
+ * Idempotente. Só ESTA tabela é NOSSA (o master não a conhece → o synchronize dele
+ * nunca a dropa, ao contrário de uma coluna nova em `teams`).
+ */
+async function ensureSofascoreTable(ds: DataSource): Promise<void> {
+  await ds.query(
+    `CREATE TABLE IF NOT EXISTS team_sofascore (
+       team_id BIGINT NOT NULL PRIMARY KEY,
+       sofascore_id BIGINT NOT NULL,
+       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+  );
+}
 
 /**
  * Garante que a ExternalWriteDataSource esteja inicializada (lazy, idempotente).
@@ -57,10 +73,12 @@ let initPromise: Promise<DataSource> | null = null;
 export async function ensureExternalWriteDb(): Promise<DataSource> {
   if (ExternalWriteDataSource.isInitialized) return ExternalWriteDataSource;
   if (!initPromise) {
-    initPromise = ExternalWriteDataSource.initialize().catch((err) => {
-      initPromise = null; // permite retry na próxima chamada
-      throw err;
-    });
+    initPromise = ExternalWriteDataSource.initialize()
+      .then(async (ds) => { await ensureSofascoreTable(ds); return ds; })
+      .catch((err) => {
+        initPromise = null; // permite retry na próxima chamada
+        throw err;
+      });
   }
   return initPromise;
 }

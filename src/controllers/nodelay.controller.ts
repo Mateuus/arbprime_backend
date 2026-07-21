@@ -7,6 +7,7 @@ import { NoDelayAccountStatus } from '../enums/nodelay.enum';
 import { encryptSecret, decryptSecret, isEncryptionConfigured } from '../utils/crypto';
 import { getRogueAnonToken, getRogueLoginToken } from '../services/nodelay/rogue-token.service';
 import { biahostedLogin, biahostedBalance, biahostedSb2Token } from '../services/nodelay/biahosted-login.service';
+import { SuperbetClient, SuperbetMfaError, newSuperbetDevice, SuperbetDevice } from '../betbot/superbet/superbet-client';
 import { placeBiahostedBet, deriveBetUrl, deriveAuthUrl, AltenarBetMarket } from '../services/nodelay/biahosted-bet.service';
 
 /**
@@ -287,7 +288,11 @@ export const listNoDelayBookmakers = async (req: FastifyRequest, reply: FastifyR
           ? !!(cfg?.wssUrl && cfg?.rogueUrl && operator)
           : h.noDelayPlatform === 'biahosted'
             ? !!(cfg?.bffUrl && cfg?.oddsUrl && cfg?.loginDomain && operator)
-            : false;
+            : h.noDelayPlatform === 'superbet'
+              // Superbet: login server-side com origin/WAF FIXOS no serviço → basta
+              // estar liberada (sem config de endpoint). Odds/place virão depois.
+              ? true
+              : false;
       return {
         slug: h.slug,
         name: h.name,
@@ -507,6 +512,182 @@ export const listNoDelaySessions = async (req: FastifyRequest, reply: FastifyRep
 // ≠ do swarm (que loga no browser): aqui o BFF exige `Origin` spoofado, que o
 // browser não seta. Lê a credencial do cofre, loga no BFF e salva a sessão
 // (token cifrado + externalUserId + status). Saldo/odds vêm depois.
+/**
+ * Conecta uma conta Superbet (Betler): login 100% cycletls no backend com DEVICE
+ * ESTÁVEL (reusa o guardado p/ o trust de MFA ~1 semana; senão gera novo). Guarda
+ * cookies+device+exp cifrados em encAuthToken. Saldo é best-effort. MFA → status
+ * MFA_REQUIRED (2º fator ainda não automatizado — o device fica guardado p/ reuso).
+ */
+async function connectSuperbet(acc: NoDelayAccount, username: string, password: string, reply: FastifyReply) {
+  let device: SuperbetDevice | undefined;
+  try {
+    const blob = JSON.parse(safeDecrypt(acc.encAuthToken) || '{}');
+    if (blob?.device?.deviceFingerprint && blob?.device?.sbDeviceId) device = blob.device;
+  } catch { /* sem device guardado */ }
+  if (!device) device = newSuperbetDevice();
+
+  const client = new SuperbetClient({ device, timeoutSec: 30 });
+  try {
+    const sess = await client.login({ username, password });
+    acc.encAuthToken = encryptSecret(JSON.stringify({ cookies: sess.cookies, device: sess.device, expiresAt: sess.expiresAt }));
+    acc.encJweToken = null;
+    acc.externalUserId = sess.userId != null ? String(sess.userId) : null;
+    acc.sessionAt = new Date();
+    acc.status = NoDelayAccountStatus.CONNECTED;
+    acc.lastError = null;
+    try {
+      const bal = await client.getBalance();
+      acc.balance = bal.total.toFixed(2);
+      acc.currency = bal.currency || acc.currency;
+      acc.balanceAt = new Date();
+    } catch { /* saldo entra no próximo refresh */ }
+    await accRepo().save(acc);
+    return reply.send(createResponse(1, 'Conta conectada.', serializeAccount(acc)));
+  } catch (e) {
+    acc.sessionAt = null;
+    if (e instanceof SuperbetMfaError) {
+      // Guarda device + o PENDING do MFA (mfaToken/otpId/wafToken) p/ os endpoints de
+      // completar/status. A parte NÃO-secreta (métodos/telefone/URL do faceid) vai no
+      // response p/ o front. O WAF token vale ~poucos min → completar logo.
+      acc.status = NoDelayAccountStatus.MFA_REQUIRED;
+      acc.lastError = `MFA exigido (${e.mfa.allowedTypes.join('/')}).`;
+      const hasFaceid = e.mfa.allowedTypes.includes('faceid');
+      // faceid: já inicia o processo Unico (mesma sessão/WAF) p/ ter a URL do celular
+      // + o otp_id. Best-effort — se falhar, o front mostra só o SMS.
+      let faceid: { unicoUrl: string; faceidOtpId: string } | null = null;
+      if (hasFaceid) {
+        try {
+          const f = await client.startFaceid(e.mfa.mfaToken, e.mfa.wafToken);
+          faceid = { unicoUrl: f.unicoUrl, faceidOtpId: f.faceidOtpId };
+        } catch { /* segue só com SMS */ }
+      }
+      acc.encAuthToken = encryptSecret(JSON.stringify({
+        device,
+        mfa: { ...e.mfa, at: Date.now(), faceidOtpId: faceid?.faceidOtpId || null, username: safeDecrypt(acc.encUsername) },
+      }));
+      await accRepo().save(acc);
+      return reply.code(200).send(createResponse(0, acc.lastError, {
+        ...serializeAccount(acc),
+        mfa: {
+          methods: e.mfa.allowedTypes,
+          phone: e.mfa.phone,
+          hasSms: e.mfa.allowedTypes.includes('sms'),
+          hasFaceid,
+          faceidUrl: faceid?.unicoUrl || null,
+        },
+      }));
+    }
+    // Falha comum: preserva só o device (trust) p/ o próximo login.
+    acc.encAuthToken = encryptSecret(JSON.stringify({ device }));
+    acc.status = NoDelayAccountStatus.LOGIN_FAILED;
+    acc.lastError = (((e as Error)?.message) || 'Login recusado pela casa.').slice(0, 200);
+    await accRepo().save(acc);
+    return reply.code(200).send(createResponse(0, acc.lastError, serializeAccount(acc)));
+  } finally {
+    await client.close().catch(() => { /* best-effort */ });
+  }
+}
+
+/** Lê o pending do MFA (device + tokens) guardado no connect. */
+type SuperbetMfaBlob = { device?: SuperbetDevice; mfa?: { mfaToken?: string; smsOtpId?: string; wafToken?: string; at?: number; faceidOtpId?: string | null; username?: string } };
+function readMfaBlob(acc: NoDelayAccount): SuperbetMfaBlob {
+  try { return JSON.parse(safeDecrypt(acc.encAuthToken) || '{}'); } catch { return {}; }
+}
+
+/**
+ * Status do faceid: `GET /accounts/:id/superbet-mfa/faceid-status` — o front faz poll
+ * até `active:true` (o usuário conclui a selfie no celular via o link/QR do Unico).
+ */
+export const getSuperbetFaceidStatus = async (req: FastifyRequest, reply: FastifyReply) => {
+  const acc = await findOwned(req, reply);
+  if (!acc) return;
+  const blob = readMfaBlob(acc);
+  const mfa = blob.mfa;
+  if (!mfa?.faceidOtpId || !mfa?.wafToken || !blob.device) {
+    return reply.code(409).send(createResponse(0, 'Sem faceid pendente.', { active: false }));
+  }
+  const client = new SuperbetClient({ device: blob.device, timeoutSec: 25 });
+  client.restoreSession({ 'aws-waf-token': mfa.wafToken });
+  try {
+    const active = await client.faceidStatus(mfa.username || safeDecrypt(acc.encUsername), mfa.faceidOtpId, mfa.wafToken);
+    return reply.send(createResponse(1, 'ok', { active }));
+  } catch (e) {
+    return reply.code(200).send(createResponse(0, (e as Error).message, { active: false }));
+  } finally {
+    await client.close().catch(() => { /* best-effort */ });
+  }
+};
+
+/**
+ * Completa o MFA da Superbet: re-login (completeMfaSms) reusando device + WAF token
+ * do connect. Manda o código SMS; se a conta também exigir faceid (reopen), verifica
+ * que a selfie foi concluída (faceidStatus) e inclui o otp do faceId no re-login.
+ * Janela curta (WAF ~poucos min).
+ */
+export const completeSuperbetMfa = async (req: FastifyRequest, reply: FastifyReply) => {
+  const acc = await findOwned(req, reply);
+  if (!acc) return;
+  const house = await bookRepo().findOneBy({ slug: acc.bookmakerSlug });
+  if (!house || house.noDelayPlatform !== 'superbet') {
+    return reply.code(400).send(createResponse(0, 'MFA só para Superbet.', []));
+  }
+  const code = String((req.body as { code?: string })?.code || '').trim();
+  if (!/^\d{4,8}$/.test(code)) return reply.code(400).send(createResponse(0, 'Código inválido (4–8 dígitos).', []));
+
+  const blob = readMfaBlob(acc);
+  const mfa = blob.mfa;
+  const device = blob.device;
+  if (!mfa?.smsOtpId || !mfa?.wafToken || !device) {
+    return reply.code(409).send(createResponse(0, 'Sem MFA pendente. Reconecte a conta.', []));
+  }
+  if (Date.now() - (mfa.at || 0) > 4 * 60 * 1000) {
+    return reply.code(409).send(createResponse(0, 'O MFA expirou (janela do WAF). Reconecte para receber um novo código.', []));
+  }
+  const username = safeDecrypt(acc.encUsername);
+  const password = safeDecrypt(acc.encPassword);
+
+  const client = new SuperbetClient({ device, timeoutSec: 30 });
+  // Restaura o cookie aws-waf-token (o completeMfaSms manda o cookie + o header).
+  client.restoreSession({ 'aws-waf-token': mfa.wafToken });
+  try {
+    // faceid (reopen): confirma a selfie e monta o otp do faceId p/ o re-login.
+    let extraOtp: Array<{ type: string; id: string; code: string }> = [];
+    if (mfa.faceidOtpId) {
+      const active = await client.faceidStatus(mfa.username || username, mfa.faceidOtpId, mfa.wafToken);
+      if (!active) {
+        return reply.code(409).send(createResponse(0, 'Faltou a selfie: abra o link no celular e conclua a verificação Unico antes.', serializeAccount(acc)));
+      }
+      extraOtp = [{ type: 'faceId', id: mfa.faceidOtpId, code: mfa.faceidOtpId }];
+    }
+    const sess = await client.completeMfaSms(
+      { username, password },
+      { smsOtpId: mfa.smsOtpId, wafToken: mfa.wafToken },
+      code,
+      { extraOtp },
+    );
+    acc.encAuthToken = encryptSecret(JSON.stringify({ cookies: sess.cookies, device: sess.device, expiresAt: sess.expiresAt }));
+    acc.encJweToken = null;
+    acc.externalUserId = sess.userId != null ? String(sess.userId) : null;
+    acc.sessionAt = new Date();
+    acc.status = NoDelayAccountStatus.CONNECTED;
+    acc.lastError = null;
+    try {
+      const bal = await client.getBalance();
+      acc.balance = bal.total.toFixed(2);
+      acc.currency = bal.currency || acc.currency;
+      acc.balanceAt = new Date();
+    } catch { /* saldo no próximo refresh */ }
+    await accRepo().save(acc);
+    return reply.send(createResponse(1, 'MFA concluído. Conta conectada.', serializeAccount(acc)));
+  } catch (e) {
+    acc.lastError = (((e as Error)?.message) || 'Código recusado.').slice(0, 200);
+    await accRepo().save(acc);
+    return reply.code(200).send(createResponse(0, acc.lastError, serializeAccount(acc)));
+  } finally {
+    await client.close().catch(() => { /* best-effort */ });
+  }
+};
+
 export const connectNoDelayAccount = async (req: FastifyRequest, reply: FastifyReply) => {
   const acc = await findOwned(req, reply);
   if (!acc) return;
@@ -515,15 +696,8 @@ export const connectNoDelayAccount = async (req: FastifyRequest, reply: FastifyR
     if (!house || !house.noDelayEnabled) {
       return reply.code(404).send(createResponse(0, 'Casa não liberada no NoDelay.', []));
     }
-    if (house.noDelayPlatform !== 'biahosted') {
+    if (house.noDelayPlatform !== 'biahosted' && house.noDelayPlatform !== 'superbet') {
       return reply.code(400).send(createResponse(0, 'Esta casa conecta pelo navegador (swarm), não pelo servidor.', []));
-    }
-    const cfg = house.noDelayConfig || {};
-    const bffUrl = cfg.bffUrl || null;
-    const origin = cfg.origin || house.url || null;
-    const domain = cfg.loginDomain || null;
-    if (!bffUrl || !origin || !domain) {
-      return reply.code(409).send(createResponse(0, 'Casa biahosted sem BFF de login / Origin / domain configurados.', []));
     }
     const username = safeDecrypt(acc.encUsername);
     const password = safeDecrypt(acc.encPassword);
@@ -533,6 +707,20 @@ export const connectNoDelayAccount = async (req: FastifyRequest, reply: FastifyR
 
     acc.status = NoDelayAccountStatus.CONNECTING;
     await accRepo().save(acc);
+
+    // Superbet (Betler): login 100% cycletls no backend, device estável + MFA.
+    if (house.noDelayPlatform === 'superbet') {
+      return await connectSuperbet(acc, username, password, reply);
+    }
+
+    // biahosted (Altenar/estrelabet): login no BFF da casa.
+    const cfg = house.noDelayConfig || {};
+    const bffUrl = cfg.bffUrl || null;
+    const origin = cfg.origin || house.url || null;
+    const domain = cfg.loginDomain || null;
+    if (!bffUrl || !origin || !domain) {
+      return reply.code(409).send(createResponse(0, 'Casa biahosted sem BFF de login / Origin / domain configurados.', []));
+    }
 
     const r = await biahostedLogin({ bffUrl, origin, domain, username, password });
 

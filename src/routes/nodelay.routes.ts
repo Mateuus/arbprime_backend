@@ -2,7 +2,7 @@ import { FastifyInstance } from "fastify";
 import {
   listNoDelayBookmakers, listNoDelayAccounts, createNoDelayAccount,
   updateNoDelayAccount, deleteNoDelayAccount, getNoDelayCredentials,
-  connectNoDelayAccount, placeNoDelayBet, getAccountBetToken, saveNoDelaySession, clearNoDelaySession, setNoDelayStatus, saveNoDelayBalance,
+  connectNoDelayAccount, completeSuperbetMfa, getSuperbetFaceidStatus, placeNoDelayBet, getAccountBetToken, saveNoDelaySession, clearNoDelaySession, setNoDelayStatus, saveNoDelayBalance,
   listNoDelaySessions, getRogueToken, getAccountRogueToken,
   listNoDelayInstances, getNoDelayInstance, createNoDelayInstance, updateNoDelayInstance, deleteNoDelayInstance,
 } from "@Controllers";
@@ -46,6 +46,8 @@ export default async function noDelayRoutes(app: FastifyInstance) {
 
   // Connect SERVER-SIDE (biahosted/Altenar): o backend loga no BFF da casa.
   app.post("/accounts/:id/connect", auth, connectNoDelayAccount);
+  app.post("/accounts/:id/superbet-mfa", auth, completeSuperbetMfa);
+  app.get("/accounts/:id/superbet-mfa/faceid-status", auth, getSuperbetFaceidStatus);
   // Token da conta p/ o BROWSER apostar direto no betgateway Altenar (client-side).
   app.get("/accounts/:id/bet-token", auth, getAccountBetToken);
   // Disparo SERVER-SIDE (biahosted): fallback — hoje o disparo é client-side.
