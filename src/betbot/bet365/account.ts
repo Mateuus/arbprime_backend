@@ -20,6 +20,11 @@ import { randomBytes, randomUUID } from 'crypto';
 // (o `&&` curto-circuita antes de avaliar os argumentos, então nem o JSON.stringify/decode roda).
 const BET365_DEBUG = !!process.env.BET365_DEBUG;
 
+// Fase 4: mint da aposta pela WARM session (~22ms) em vez de COLD (~1,1s). A warm é primada com o contexto
+// ESTÁVEL da aposta (n/o/i/j/geo) e o hash do jogo vai por-mint. Fallback COLD se a warm falhar. Desliga com
+// BET365_WARM_MINTS=0 (se o token quente não for aceito). Ver [[bet365-nodelay-betting]].
+const WARM_MINTS = process.env.BET365_WARM_MINTS !== '0';
+
 /**
  * Parser flexível do saldo da bet365. A resposta do balanceapi ainda não foi capturada com body;
  * a bet365 costuma responder key=value delimitado (ex.: "AC=...,AB=1234.56,...") OU JSON.
@@ -344,10 +349,39 @@ export class Bet365Account {
   private async mintBetNst(url: string, body: string, sst: string): Promise<string> {
     const fi = (/[#&]f=(\d+)/.exec(decodeURIComponent(body)) || [])[1] || '';
     const hash = fi ? `#/AC/B1/C1/D8/E${fi}/F3/I1/I%5E21/` : undefined;
+    // Fase 4: WARM (~22ms) — a warm é primada com o contexto estável (n/o/i/j/geo); url/body/hash vão por-mint.
+    if (WARM_MINTS && this.warm) {
+      try {
+        await this.ensureWarmForBet(sst);
+        const tok = await this.warm!.mint({ url, body, hash, sst });
+        if (tok) return tok;
+      } catch { /* cai p/ COLD abaixo */ }
+    }
+    // COLD (~1,1s) — fallback / caminho antigo (re-primeia tudo por mint).
     return this.engine.mint({
       mode: 'addbet', sst,
       session: { ...this.sessionCtx(), ipv6: this.betIpv6, geo: this.betGeo, url, body, hash, username: this.membersUsername(), countryId: 28, currencyRate: this.betCurrencyRate },
     });
+  }
+
+  /** Contexto ESTÁVEL p/ PRIMAR a warm session de aposta (n/o/i/j/geo). url/body/hash vão por-mint. */
+  private betWarmSession(): any {
+    return { ...this.sessionCtx(), ipv6: this.betIpv6, geo: this.betGeo, username: this.membersUsername(), countryId: 28, currencyRate: this.betCurrencyRate };
+  }
+  /** Assinatura do contexto ESTÁVEL de aposta — muda quando ipv6/geo/user/currencyRate mudam → re-primar a warm.
+   *  NÃO inclui i_r (incrementa a cada aposta; o token só precisa de i_r≈32+, valor exato não importa). */
+  private betCtxSig(): string {
+    const g = this.betGeo;
+    return `${this.betIpv6}|${g ? `${g.lat},${g.lon},${g.acc}` : '-'}|${this.membersUsername() || '-'}|${this.betCurrencyRate}`;
+  }
+  private warmSig = '';
+  /** Garante a warm session primada com o contexto de aposta ATUAL (re-prima só se ipv6/geo/user mudaram). */
+  private async ensureWarmForBet(sst: string): Promise<void> {
+    const sig = this.betCtxSig();
+    if (this.warm && this.warmSig === sig) return; // já quente com o contexto certo
+    if (this.warm) { try { await this.warm.close(); } catch { /* */ } }
+    this.warm = await this.engine.warmSession({ session: this.betWarmSession(), sst });
+    this.warmSig = sig;
   }
 
   /** Carrega o contexto nst da conta 1× (~540ms) → mints de aposta ~22ms. Chame após o login. */
@@ -362,7 +396,10 @@ export class Bet365Account {
     await this.activateBettingSession();
     if (this.ir < betIr) await this.bumpIr(betIr - this.ir);
     if (this.warm) await this.warm.close();
-    this.warm = await this.engine.warmSession({ session: this.sessionCtx(), sst: this.sst });
+    // Prima a warm JÁ com o contexto de aposta (n/o/i/j/geo) → os mints da aposta saem quentes (~22ms). O
+    // hash do jogo vai por-mint (ensureWarmForBet re-prima só se ipv6/geo/user mudarem). Fase 4.
+    this.warm = await this.engine.warmSession({ session: this.betWarmSession(), sst: this.sst });
+    this.warmSig = this.betCtxSig();
   }
 
   /**

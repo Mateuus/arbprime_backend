@@ -656,7 +656,7 @@ async function connectSuperbet(acc: NoDelayAccount, username: string, password: 
  * bet365: login 100% headless no backend (cycletls + mint do nst) → guarda a sessão (cookies)
  * e retorna o SALDO. O device (fingerprint/canvas/...) é da MÁQUINA (BET365_DEVICE_PATH), não da conta.
  */
-async function connectBet365(acc: NoDelayAccount, username: string, password: string, reply: FastifyReply) {
+async function connectBet365(acc: NoDelayAccount, username: string, password: string, reply: FastifyReply, betCtx?: Bet365BetCtx) {
   // Device DA CONTA (entidade bet365_devices) — gera na 1ª vez. Cada conta tem o SEU (senão compartilham
   // device-trust e se invalidam). Fallback = device da máquina (só serve p/ 1 conta).
   const device = await getBet365DeviceForAccount(acc.id);
@@ -696,7 +696,7 @@ async function connectBet365(acc: NoDelayAccount, username: string, password: st
     // RECONNECT = sessão NOVA (o bet365 invalida a antiga). Descarta o cliente velho do pool ANTES de re-aquecer,
     // senão a instância quente fica com a sessão morta → addbet {sr:8,invalid_login}. Depois sobe a quente nova.
     await evictBet365Warm(acc.id);
-    prewarmBet365Client(acc.id, device, { cookies: sess.cookies, pstk: sess.pstk, b: sess.b, ir: sess.ir });
+    prewarmBet365Client(acc.id, device, { cookies: sess.cookies, pstk: sess.pstk, b: sess.b, ir: sess.ir }, betCtx);
     return reply.send(createResponse(1, 'Conta conectada.', serializeAccount(acc)));
   } catch (e) {
     acc.sessionAt = null;
@@ -834,9 +834,12 @@ export const connectNoDelayAccount = async (req: FastifyRequest, reply: FastifyR
       return await connectSuperbet(acc, username, password, reply);
     }
 
-    // bet365: login 100% headless no backend (cycletls + mint do nst), retorna o saldo.
+    // bet365: login 100% headless no backend (cycletls + mint do nst), retorna o saldo. ipv6/geo do usuário
+    // (frontend) já no connect → a warm session prima com o geo real → a 1ª aposta já sai quente (sem "aposta de aquecimento").
     if (house.noDelayPlatform === 'bet365') {
-      return await connectBet365(acc, username, password, reply);
+      const cb = (req.body || {}) as { ipv6?: string; geo?: { lat: number; lon: number; acc: number } };
+      const betCtx = (cb.ipv6 || cb.geo) ? { ipv6: cb.ipv6, geo: cb.geo } : undefined;
+      return await connectBet365(acc, username, password, reply, betCtx);
     }
 
     // biahosted (Altenar/estrelabet): login no BFF da casa.
@@ -1067,10 +1070,12 @@ function sweepIdleBet365(nowMs: number): void {
   }
 }
 
+type Bet365BetCtx = { ipv6?: string; geo?: { lat: number; lon: number; acc: number } };
 async function getWarmBet365Client(
   accId: string,
   device: NonNullable<ReturnType<typeof loadBet365Device>>,
   blob: { cookies?: Record<string, string>; pstk?: string; b?: string; ir?: number },
+  betCtx?: Bet365BetCtx, // ipv6/geo do usuário JÁ no connect → a warm prima com o geo certo (1ª aposta já quente)
 ): Promise<Bet365Account> {
   const now = Date.now();
   sweepIdleBet365(now);
@@ -1088,6 +1093,7 @@ async function getWarmBet365Client(
   // 1ª vez (ou pós-restart): cria, reidrata do cofre e aquece uma única vez.
   const client = new Bet365Account({ device });
   client.restoreSession(blob.cookies || {}, blob.pstk, { b: blob.b, ir: blob.ir });
+  if (betCtx) client.setBetContext(betCtx); // ANTES do warmBetting → a warm session já prima com o geo/ipv6 reais
   const entry: WarmBet365 = { client, warmedAt: 0, usedAt: now, warming: null, timer: null };
   bet365WarmPool.set(accId, entry);
   const p = client.warmBetting();
@@ -1104,9 +1110,10 @@ function prewarmBet365Client(
   accId: string,
   device: NonNullable<ReturnType<typeof loadBet365Device>>,
   blob: { cookies?: Record<string, string>; pstk?: string; b?: string; ir?: number },
+  betCtx?: Bet365BetCtx,
 ): void {
   if (bet365WarmPool.has(accId)) return; // já quente
-  void getWarmBet365Client(accId, device, blob).catch(() => { /* a 1ª aposta re-aquece se isto falhar */ });
+  void getWarmBet365Client(accId, device, blob, betCtx).catch(() => { /* a 1ª aposta re-aquece se isto falhar */ });
 }
 
 /** Descarta a instância quente da conta (disconnect / sessão caída) — para o heartbeat + libera worker + engine. */
