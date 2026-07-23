@@ -8,6 +8,9 @@ import { encryptSecret, decryptSecret, isEncryptionConfigured } from '../utils/c
 import { getRogueAnonToken, getRogueLoginToken } from '../services/nodelay/rogue-token.service';
 import { biahostedLogin, biahostedBalance, biahostedSb2Token } from '../services/nodelay/biahosted-login.service';
 import { SuperbetClient, SuperbetMfaError, newSuperbetDevice, SuperbetDevice } from '../betbot/superbet/superbet-client';
+import { Bet365Account } from '../betbot/bet365/account';
+import { loadBet365Device } from '../betbot/bet365/device';
+import { buildAddbetBody, buildPlacebetBody, selectionFromPlaceable } from '../betbot/bet365/betslip';
 import { placeBiahostedBet, deriveBetUrl, deriveAuthUrl, AltenarBetMarket } from '../services/nodelay/biahosted-bet.service';
 
 /**
@@ -292,7 +295,12 @@ export const listNoDelayBookmakers = async (req: FastifyRequest, reply: FastifyR
               // Superbet: login server-side com origin/WAF FIXOS no serviço → basta
               // estar liberada (sem config de endpoint). Odds/place virão depois.
               ? true
-              : false;
+              : h.noDelayPlatform === 'bet365'
+                // bet365: login server-side headless. Liberada como a superbet (sem config de
+                // endpoint). O device POR-MÁQUINA é exigido no CONNECT/APOSTA (erro claro lá) —
+                // não é gate p/ aparecer no catálogo nem p/ entrar numa instância.
+                ? true
+                : false;
       return {
         slug: h.slug,
         name: h.name,
@@ -590,6 +598,54 @@ async function connectSuperbet(acc: NoDelayAccount, username: string, password: 
   }
 }
 
+/**
+ * bet365: login 100% headless no backend (cycletls + mint do nst) → guarda a sessão (cookies)
+ * e retorna o SALDO. O device (fingerprint/canvas/...) é da MÁQUINA (BET365_DEVICE_PATH), não da conta.
+ */
+async function connectBet365(acc: NoDelayAccount, username: string, password: string, reply: FastifyReply) {
+  const device = loadBet365Device();
+  if (!device) {
+    acc.status = NoDelayAccountStatus.LOGIN_FAILED;
+    acc.lastError = 'Device bet365 não provisionado nesta máquina (defina BET365_DEVICE_PATH).';
+    await accRepo().save(acc);
+    return reply.code(200).send(createResponse(0, acc.lastError, serializeAccount(acc)));
+  }
+  const client = new Bet365Account({ device });
+  try {
+    const r = await client.login({ unem: username, pw: password });
+    if (!r.ok) {
+      acc.sessionAt = null;
+      acc.status = NoDelayAccountStatus.LOGIN_FAILED;
+      acc.lastError = `Login recusado pela bet365 (${r.resultCode || 'fail'}).`.slice(0, 200);
+      await accRepo().save(acc);
+      return reply.code(200).send(createResponse(0, acc.lastError, serializeAccount(acc)));
+    }
+    const sess = client.exportSession();
+    acc.encAuthToken = encryptSecret(JSON.stringify({ cookies: sess.cookies, pstk: sess.pstk, b: sess.b, ir: sess.ir }));
+    acc.encJweToken = null;
+    acc.externalUserId = client.externalUserId ?? null;
+    acc.sessionAt = new Date();
+    acc.status = NoDelayAccountStatus.CONNECTED;
+    acc.lastError = null;
+    try {
+      const bal = await client.getBalance();
+      acc.balance = bal.total.toFixed(2);
+      acc.currency = bal.currency || acc.currency;
+      acc.balanceAt = new Date();
+    } catch { /* saldo entra no próximo refresh */ }
+    await accRepo().save(acc);
+    return reply.send(createResponse(1, 'Conta conectada.', serializeAccount(acc)));
+  } catch (e) {
+    acc.sessionAt = null;
+    acc.status = NoDelayAccountStatus.LOGIN_FAILED;
+    acc.lastError = (((e as Error)?.message) || 'Falha no login bet365.').slice(0, 200);
+    await accRepo().save(acc);
+    return reply.code(200).send(createResponse(0, acc.lastError, serializeAccount(acc)));
+  } finally {
+    await client.close().catch(() => { /* best-effort */ });
+  }
+}
+
 /** Lê o pending do MFA (device + tokens) guardado no connect. */
 type SuperbetMfaBlob = { device?: SuperbetDevice; mfa?: { mfaToken?: string; smsOtpId?: string; wafToken?: string; at?: number; faceidOtpId?: string | null; username?: string } };
 function readMfaBlob(acc: NoDelayAccount): SuperbetMfaBlob {
@@ -698,7 +754,7 @@ export const connectNoDelayAccount = async (req: FastifyRequest, reply: FastifyR
     if (!house || !house.noDelayEnabled) {
       return reply.code(404).send(createResponse(0, 'Casa não liberada no NoDelay.', []));
     }
-    if (house.noDelayPlatform !== 'biahosted' && house.noDelayPlatform !== 'superbet') {
+    if (house.noDelayPlatform !== 'biahosted' && house.noDelayPlatform !== 'superbet' && house.noDelayPlatform !== 'bet365') {
       return reply.code(400).send(createResponse(0, 'Esta casa conecta pelo navegador (swarm), não pelo servidor.', []));
     }
     const username = safeDecrypt(acc.encUsername);
@@ -713,6 +769,11 @@ export const connectNoDelayAccount = async (req: FastifyRequest, reply: FastifyR
     // Superbet (Betler): login 100% cycletls no backend, device estável + MFA.
     if (house.noDelayPlatform === 'superbet') {
       return await connectSuperbet(acc, username, password, reply);
+    }
+
+    // bet365: login 100% headless no backend (cycletls + mint do nst), retorna o saldo.
+    if (house.noDelayPlatform === 'bet365') {
+      return await connectBet365(acc, username, password, reply);
     }
 
     // biahosted (Altenar/estrelabet): login no BFF da casa.
@@ -884,6 +945,8 @@ export const placeSuperbetBet = async (req: FastifyRequest, reply: FastifyReply)
     const r = await client.placeTicket({ eventId: b.eventId, oddUuid: b.oddUuid, stake, betType: b.betType || 'prematch', autoAccept: b.autoAccept });
     const elapsedMs = Date.now() - started;
     console.log(`[nodelay/superbet-bet] acc=${acc.id} ok=${r.ok} status=${r.status} stake=${stake} odds=${r.placedOdds} ticket=${r.ticketId ?? '-'} err=${r.error ?? '-'}`);
+    // DEBUG temporário: grava a resposta CRUA da Superbet p/ diagnóstico do prematch.
+    try { require('fs').appendFileSync('/tmp/sb_place_debug.log', JSON.stringify({ at: new Date().toISOString(), betType: b.betType, eventId: b.eventId, oddUuid: b.oddUuid, stake, ok: r.ok, status: r.status, err: r.error, raw: r.raw }) + '\n'); } catch { /* */ }
 
     // Persiste cookies atualizados (mantém a sessão fresca) — best-effort.
     try {
@@ -897,6 +960,86 @@ export const placeSuperbetBet = async (req: FastifyRequest, reply: FastifyReply)
     return reply.send(createResponse(1, 'Aposta feita.', { ...r, elapsedMs }));
   } catch (error) {
     return reply.code(502).send(createResponse(0, 'Falha ao apostar na Superbet.', { error: (error as Error).message }));
+  }
+};
+
+// POST /nodelay/accounts/:id/bet365-bet { eventId, placeable:{selectionId,mt,odd}, line?, stake, acceptOddsChange? }
+// Aposta na bet365 (addbet→placebet) 100% headless no BACKEND: reidrata a sessão (cookies+pstk do
+// cofre) + o device da MÁQUINA (BET365_DEVICE_PATH), aquece o contexto nst (warmBetting ~540ms) e
+// dispara. O addbet devolve `cs` — se ≠1, o buildPlacebetBody LANÇA e o placebet NÃO sai (nada
+// apostado). Espelha o placeSuperbetBet. Mercados apostáveis hoje: 1X2 (mt=7) e Total de Gols (mt=13).
+export const placeBet365Bet = async (req: FastifyRequest, reply: FastifyReply) => {
+  const acc = await findOwned(req, reply);
+  if (!acc) return;
+  try {
+    const house = await bookRepo().findOneBy({ slug: acc.bookmakerSlug });
+    if (!house || house.noDelayPlatform !== 'bet365') {
+      return reply.code(400).send(createResponse(0, 'Aposta server-side só p/ bet365.', []));
+    }
+    if (!acc.encAuthToken) {
+      return reply.code(409).send(createResponse(0, 'Conta sem sessão. Conecte antes de apostar.', []));
+    }
+    const b = (req.body || {}) as {
+      eventId?: string; placeable?: Record<string, unknown>; line?: string; stake?: number; acceptOddsChange?: boolean;
+      ipv6?: string; geo?: { lat: number; lon: number; acc: number }; // do frontend: WebRTC srflx + geolocation do usuário
+    };
+    const stake = Number(b.stake);
+    if (!b.eventId || !b.placeable) return reply.code(400).send(createResponse(0, 'Ticket incompleto (eventId/placeable).', []));
+    if (!Number.isFinite(stake) || stake <= 0) return reply.code(400).send(createResponse(0, "Campo 'stake' inválido.", []));
+
+    const sel = selectionFromPlaceable(b.placeable, String(b.eventId), b.line);
+    if (!sel) return reply.code(400).send(createResponse(0, 'Seleção bet365 não apostável (faltam fp/mt/od).', []));
+    // DEBUG: mostra o que o FRONT mandou + o body do addbet (console + arquivo p/ eu ler).
+    const __dbg = { at: new Date().toISOString(), placeableDoFront: b.placeable, sel, addbetBody: buildAddbetBody(sel), stake };
+    console.log(`[nodelay/bet365-bet] ${JSON.stringify(__dbg)}`);
+    try { require('fs').appendFileSync('/tmp/bet365_place_debug.log', JSON.stringify(__dbg) + '\n'); } catch { /* */ }
+
+    const device = loadBet365Device();
+    if (!device) return reply.code(409).send(createResponse(0, 'Device bet365 não provisionado nesta máquina.', []));
+
+    let blob: { cookies?: Record<string, string>; pstk?: string; b?: string; ir?: number } = {};
+    try { blob = JSON.parse(safeDecrypt(acc.encAuthToken) || '{}'); } catch { /* ilegível */ }
+    if (!blob.cookies) return reply.code(409).send(createResponse(0, 'Sessão bet365 ilegível. Reconecte a conta.', []));
+
+    const client = new Bet365Account({ device });
+    try {
+      client.restoreSession(blob.cookies, blob.pstk, { b: blob.b, ir: blob.ir });
+      client.setBetContext({ ipv6: b.ipv6, geo: b.geo }); // ipv6/geo REAIS do usuário (frontend) → nst autêntico
+      await client.warmBetting();
+      const started = Date.now();
+      const { addbet, placebet } = await client.placeBet({
+        addbetBody: buildAddbetBody(sel),
+        buildPlacebetBody: (resp) => buildPlacebetBody(resp, sel, stake, { acceptOddsChange: b.acceptOddsChange }),
+      });
+      const elapsedMs = Date.now() - started;
+      const pj = (placebet && typeof placebet === 'object' ? placebet : {}) as { cs?: number; br?: string; mi?: string; bt?: Array<{ od?: string }> };
+      const ok = !!pj.br || pj.cs === 1; // `br` = comprovante da aposta; cs:1 = aceito
+      console.log(`[nodelay/bet365-bet] acc=${acc.id} ok=${ok} stake=${stake} bg=${(addbet as { bg?: string })?.bg ?? '-'} br=${pj.br ?? '-'} elapsed=${elapsedMs}ms`);
+      // Persiste cookies atualizados (mantém a sessão fresca) — best-effort.
+      try {
+        const sess = client.exportSession();
+        acc.encAuthToken = encryptSecret(JSON.stringify({ cookies: sess.cookies, pstk: sess.pstk }));
+        await accRepo().save(acc);
+      } catch { /* ignora */ }
+      // ODD MUDOU (o usuário NÃO tinha aceitado): devolve estruturado p/ o frontend perguntar "apostar na nova odd?".
+      if (!ok && pj.cs === 2 && pj.mi === 'selections_changed') {
+        const newOdds = pj.bt?.[0]?.od;
+        return reply.send(createResponse(2, `A odd mudou de ${sel.od} para ${newOdds ?? '?'}.`, {
+          oddsChanged: true, oldOdds: sel.od, newOdds, addbet, placebet, elapsedMs,
+        }));
+      }
+      if (!ok) return reply.code(200).send(createResponse(0, 'Aposta recusada pela bet365.', { addbet, placebet, elapsedMs }));
+      return reply.send(createResponse(1, 'Aposta feita.', { betId: pj.br ?? (addbet as { bg?: string })?.bg, placedOdds: sel.od, addbet, placebet, elapsedMs }));
+    } finally {
+      await client.close().catch(() => { /* best-effort */ });
+    }
+  } catch (error) {
+    // buildPlacebetBody lança em cs≠1 ("addbet recusado …") → cai aqui como recusa da casa (200).
+    const msg = (error as Error)?.message || 'Falha ao apostar na bet365.';
+    console.log(`[nodelay/bet365-bet] REJEITADO: ${msg}`);
+    try { require('fs').appendFileSync('/tmp/bet365_place_debug.log', JSON.stringify({ at: new Date().toISOString(), REJEITADO: msg }) + '\n'); } catch { /* */ }
+    const code = /addbet recusado/i.test(msg) ? 200 : 502;
+    return reply.code(code).send(createResponse(0, msg, { error: msg }));
   }
 };
 

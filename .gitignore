@@ -18,3 +18,4 @@ pm2.log
 # PrimeTV python sidecar venv (recriado no deploy)
 python/.venv/
 python/__pycache__/
+bet365-device.json

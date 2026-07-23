@@ -30,6 +30,14 @@ export enum NoDelayPlatform {
    * origin/WAF host são fixos no serviço (não vêm do noDelayConfig).
    */
   SUPERBET = 'superbet',
+  /**
+   * bet365. Login + aposta 100% headless no BACKEND (sem browser no hot path): coleta de
+   * estado via cycletls (JA3 Chrome, passa o Cloudflare) + mint do token x-net-sync-term (nst)
+   * pelo pacote @arbprime/bet365-nst (roda o bytecode real do coletor num worker isolado).
+   * Sessão = cookies (aaat/usdi/pstk/swt/pers) + device capturado 1x/máquina (fingerprint/canvas/
+   * syscolors/device-trust/cf3/cf4). O nst é um timestamp → o host precisa de relógio NTP (skew <65s).
+   */
+  BET365 = 'bet365',
 }
 
 /** Estado da sessão da conta na casa. */

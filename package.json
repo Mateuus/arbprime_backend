@@ -61,6 +61,7 @@
     "@fastify/cors": "^11.2.0",
     "@fastify/formbody": "^8.0.2",
     "axios": "^1.7.9",
+    "@arbprime/bet365-nst": "file:../packages/bet365-nst",
     "bcrypt": "^5.1.1",
     "bcryptjs": "^2.4.3",
     "ccxt": "^4.4.53",
