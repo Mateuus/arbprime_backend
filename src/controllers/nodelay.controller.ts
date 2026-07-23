@@ -693,7 +693,9 @@ async function connectBet365(acc: NoDelayAccount, username: string, password: st
     // Captura o `aaat` que o bet365 emitiu no login (device-trust DA CONTA) → grava na entidade do device.
     await captureBet365Trust(acc.id, sess.cookies);
     if (sess.cookies['aaat']) { device.deviceTrust.aaat = sess.cookies['aaat']; if (sess.cookies['usdi']) device.deviceTrust.usdi = sess.cookies['usdi']; }
-    // Sobe a instância QUENTE já no connect (background) → a 1ª aposta já acha quente, sem "aposta de aquecimento".
+    // RECONNECT = sessão NOVA (o bet365 invalida a antiga). Descarta o cliente velho do pool ANTES de re-aquecer,
+    // senão a instância quente fica com a sessão morta → addbet {sr:8,invalid_login}. Depois sobe a quente nova.
+    await evictBet365Warm(acc.id);
     prewarmBet365Client(acc.id, device, { cookies: sess.cookies, pstk: sess.pstk, b: sess.b, ir: sess.ir });
     return reply.send(createResponse(1, 'Conta conectada.', serializeAccount(acc)));
   } catch (e) {
@@ -1153,11 +1155,15 @@ export const placeBet365Bet = async (req: FastifyRequest, reply: FastifyReply) =
     try { blob = JSON.parse(safeDecrypt(acc.encAuthToken) || '{}'); } catch { /* ilegível */ }
     if (!blob.cookies) return reply.code(409).send(createResponse(0, 'Sessão bet365 ilegível. Reconecte a conta.', []));
 
+    const _tDev0 = Date.now();
     const device = await getBet365DeviceForAccount(acc.id); // device DA CONTA (entidade) → fallback device da máquina
     if (!device) return reply.code(409).send(createResponse(0, 'Device bet365 não provisionado.', []));
+    const _tDev = Date.now() - _tDev0;
 
     // Instância QUENTE persistente: aquece 1× e reusa (a aposta seguinte é só mint+POST). NÃO fecha no fim.
+    const _tWarm0 = Date.now();
     const client = await getWarmBet365Client(acc.id, device, blob);
+    const _tWarm = Date.now() - _tWarm0; // ~0 se quente; alto se re-aqueceu (sessão caiu)
     try {
       client.setBetContext({ ipv6: b.ipv6, geo: b.geo }); // ipv6/geo REAIS do usuário (frontend) → nst autêntico
       const started = Date.now();
@@ -1166,6 +1172,7 @@ export const placeBet365Bet = async (req: FastifyRequest, reply: FastifyReply) =
         buildPlacebetBody: (resp) => buildPlacebetBody(resp, sel, stake, { acceptOddsChange: b.acceptOddsChange }),
       });
       const elapsedMs = Date.now() - started;
+      try { require('fs').appendFileSync('/tmp/bet365_timing.log', `${new Date().toISOString()} handler acc=${acc.id} devLoad=${_tDev}ms warm=${_tWarm}ms place=${elapsedMs}ms\n`); } catch { /* */ }
       const pj = (placebet && typeof placebet === 'object' ? placebet : {}) as { cs?: number; br?: string; mi?: string; bt?: Array<{ od?: string }> };
       const ok = !!pj.br || pj.cs === 1; // `br` = comprovante da aposta; cs:1 = aceito
       console.log(`[nodelay/bet365-bet] acc=${acc.id} ok=${ok} stake=${stake} bg=${(addbet as { bg?: string })?.bg ?? '-'} br=${pj.br ?? '-'} elapsed=${elapsedMs}ms`);

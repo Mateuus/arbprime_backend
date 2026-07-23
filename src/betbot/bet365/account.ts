@@ -375,9 +375,10 @@ export class Bet365Account {
     await this.activateBettingSession();
   }
 
-  /** Garante um SST recente (refetch se >~20s). */
+  /** Garante um SST recente. Limiar 120s: o heartbeat (90s) mantém a SST fresca via collectState, então
+   *  aqui só refaz se o heartbeat falhou — tira o collectState (~1s, 3 GETs) do caminho da aposta. */
   private async freshSst(): Promise<string> {
-    if (!this.sst || Date.now() - this.sstAt > 20000) await this.collectState();
+    if (!this.sst || Date.now() - this.sstAt > 120000) await this.collectState();
     return this.sst;
   }
 
@@ -400,10 +401,13 @@ export class Bet365Account {
     buildPlacebetBody: (addbetResp: any) => { url: string; body: string };
   }): Promise<{ addbet: any; placebet: any }> {
     if (!this.warm) throw new Error('chame warmBetting() antes de placeBet()');
-    const sst = await this.freshSst();
+    // Timing por-etapa (p/ atacar a latência) → /tmp/bet365_timing.log.
+    const _t: Record<string, number> = {}; const _m0 = Date.now(); let _tp = _m0;
+    const _mk = (k: string) => { const n = Date.now(); _t[k] = n - _tp; _tp = n; };
+    const sst = await this.freshSst(); _mk('freshSst');
 
     // 1) ADDBET — minta COLD com TODOS os campos (c/n/o/i/j/geo/hash) + POST. warm.mint NÃO serve (sem hash por-jogo).
-    const nstA = await this.mintBetNst('/BetsWebAPI/addbet', req.addbetBody, sst);
+    const nstA = await this.mintBetNst('/BetsWebAPI/addbet', req.addbetBody, sst); _mk('mintAdd');
     // DEBUG: SST (byte1: 0xba=autenticado, 0x45=anon, 0xaa=login) + nst decodificado + cookies vivos.
     if (BET365_DEBUG) try {
       const sstBuf = Buffer.from(String(sst).replace(/=+$/, ''), 'base64');
@@ -413,14 +417,14 @@ export class Bet365Account {
       }) + '\n');
     } catch (e) { try { BET365_DEBUG && require('fs').appendFileSync('/tmp/bet365_place_debug.log','NST decode err: ' + (e as Error).message + '\n'); } catch { /* */ } }
     this.ir++;
-    const rA = await this.http.request('post', BASE + '/BetsWebAPI/addbet', { body: req.addbetBody, headers: this.addbetHeaders(nstA) });
+    const rA = await this.http.request('post', BASE + '/BetsWebAPI/addbet', { body: req.addbetBody, headers: this.addbetHeaders(nstA) }); _mk('postAdd');
     const addbet = rA.json ?? rA.body;
 
     // 2) PLACEBET — monta o body a partir do addbet (betGuid etc.), minta COLD (mesmos campos) + POST
     const pb = req.buildPlacebetBody(addbet);
-    const nstP = await this.mintBetNst(pb.url.replace(BASE, ''), pb.body, sst);
+    const nstP = await this.mintBetNst(pb.url.replace(BASE, ''), pb.body, sst); _mk('mintPlace');
     this.ir++;
-    const rP = await this.http.request('post', pb.url.startsWith('http') ? pb.url : BASE + pb.url, { body: pb.body, headers: this.addbetHeaders(nstP) });
+    const rP = await this.http.request('post', pb.url.startsWith('http') ? pb.url : BASE + pb.url, { body: pb.body, headers: this.addbetHeaders(nstP) }); _mk('postPlace');
     let placebet = rP.json ?? rP.body;
     // DEBUG placebet: url + body + resposta crua p/ diagnosticar recusa. Remover depois.
     try { BET365_DEBUG && require('fs').appendFileSync('/tmp/bet365_place_debug.log',JSON.stringify({ PLACEBET: { url: pb.url.slice(0, 120), body: decodeURIComponent(pb.body).slice(0, 240), status: rP.status, resp: String(rP.body).slice(0, 400) } }) + '\n'); } catch { /* */ }
@@ -437,8 +441,10 @@ export class Bet365Account {
         placebet = rP2.json ?? rP2.body;
         try { BET365_DEBUG && require('fs').appendFileSync('/tmp/bet365_place_debug.log',JSON.stringify({ PLACEBET_REOFFER: { url: pb2.url.slice(0, 120), body: decodeURIComponent(pb2.body).slice(0, 240), status: rP2.status, resp: String(rP2.body).slice(0, 400) } }) + '\n'); } catch { /* */ }
       } catch { /* acceptOddsChange=false → mantém a recusa por mudança de odd */ }
+      _mk('reoffer');
     }
 
+    try { require('fs').appendFileSync('/tmp/bet365_timing.log', `${new Date().toISOString()} place total=${Date.now() - _m0}ms ` + Object.entries(_t).map(([k, v]) => `${k}=${v}`).join(' ') + '\n'); } catch { /* */ }
     return { addbet, placebet };
   }
 
