@@ -66,7 +66,7 @@ export interface Bet365Device {
   fingerprint: any;            // fingerprint.json (ua, screen, webgl, rtc, ...)
   canvasDumps: string[];       // capture_canvas.py → toDataURL[].data
   syscolors: Record<string, string>; // capture_syscolors.py
-  deviceTrust: { aaat: string; usdi: string; [k: string]: string }; // cookies device-trust do device lembrado
+  deviceTrust: { aaat?: string; usdi: string; [k: string]: string | undefined }; // device-trust; aaat AUSENTE em device novo (emitido no 1º login/enroll)
   cf3: string;                 // localStorage.cf3 (i_ps)
   cf4: string;                 // localStorage.cf4 (i_u)
 }

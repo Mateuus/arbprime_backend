@@ -9,7 +9,8 @@ import { getRogueAnonToken, getRogueLoginToken } from '../services/nodelay/rogue
 import { biahostedLogin, biahostedBalance, biahostedSb2Token } from '../services/nodelay/biahosted-login.service';
 import { SuperbetClient, SuperbetMfaError, newSuperbetDevice, SuperbetDevice } from '../betbot/superbet/superbet-client';
 import { Bet365Account, Bet365Device } from '../betbot/bet365/account';
-import { loadBet365Device } from '../betbot/bet365/device';
+import { loadBet365Device, newBet365Device } from '../betbot/bet365/device';
+import { Bet365DeviceEntity } from '../database/entities/Bet365DeviceEntity';
 import { buildAddbetBody, buildPlacebetBody, selectionFromPlaceable } from '../betbot/bet365/betslip';
 import { placeBiahostedBet, deriveBetUrl, deriveAuthUrl, AltenarBetMarket } from '../services/nodelay/biahosted-bet.service';
 
@@ -30,6 +31,53 @@ import { placeBiahostedBet, deriveBetUrl, deriveAuthUrl, AltenarBetMarket } from
 const accRepo = () => AppDataSource.getRepository(NoDelayAccount);
 const bookRepo = () => AppDataSource.getRepository(Bookmaker);
 const instRepo = () => AppDataSource.getRepository(NoDelayInstance);
+const bet365DeviceRepo = () => AppDataSource.getRepository(Bet365DeviceEntity);
+
+/**
+ * Device bet365 DA CONTA (entidade bet365_devices). Lê da entidade; se não existir, GERA (newBet365Device:
+ * fingerprint da máquina + usdi/uqid próprio, SEM aaat) e grava. Fallback = device da máquina (se não há device
+ * base p/ gerar). Ver [[bet365-multiaccount-device]].
+ */
+async function getBet365DeviceForAccount(accountId: string): Promise<Bet365Device | null> {
+  const row = await bet365DeviceRepo().findOneBy({ accountId });
+  if (row?.payload) return row.payload as unknown as Bet365Device;
+  // Sem device ainda. Se o device da MÁQUINA pertence a ESTA conta (aaat ue=email da conta), usa ele
+  // (já confiável — não quebra a conta que já funcionava). Senão, GERA um device novo (aaat vem no enroll).
+  const machine = loadBet365Device();
+  let device: Bet365Device | null = null;
+  let trusted = false;
+  try {
+    const acc = await accRepo().findOneBy({ id: accountId });
+    const user = (acc ? safeDecrypt(acc.encUsername) || '' : '').toLowerCase();
+    const ue = ((/[&;?]ue=([^&;]+)/i.exec(machine?.deviceTrust.aaat || '') || [])[1] || '').toLowerCase();
+    const ueLocal = ue.split('@')[0]; const userLocal = user.split('@')[0];
+    if (machine && ue && user && (ue === user || (!!ueLocal && ueLocal === userLocal))) { device = machine; trusted = true; }
+  } catch { /* segue p/ gerar */ }
+  if (!device) device = newBet365Device(); // device novo (enroll no 1º login)
+  if (!device) return machine; // sem base p/ gerar → fallback
+  try { await bet365DeviceRepo().save(bet365DeviceRepo().create({ accountId, payload: device as unknown as Record<string, unknown>, trusted, trustedAt: trusted ? new Date() : null })); } catch { /* corrida: outra req criou */ }
+  return device;
+}
+
+/**
+ * Captura o device-trust emitido no login. Se o bet365 devolveu um `aaat` (device confiável), grava na
+ * entidade do device (trusted=true) → as próximas aposta/login usam o device confiável DA CONTA. Se não veio
+ * aaat, o device segue não-confiável (enroll não completou — provável gate de verificação). Loga o resultado.
+ */
+async function captureBet365Trust(accountId: string, cookies: Record<string, string>): Promise<boolean> {
+  const aaat = cookies['aaat']; const usdi = cookies['usdi'];
+  const row = await bet365DeviceRepo().findOneBy({ accountId });
+  const line = `[bet365-device] enroll acc=${accountId} aaatIssued=${!!aaat} usdi=${!!usdi} ue=${(/[&;?]ue=([^&;]+)/i.exec(aaat || '') || [])[1] || '-'} cookies=${Object.keys(cookies).join(',')}`;
+  console.log(line);
+  try { require('fs').appendFileSync('/tmp/bet365_enroll.log', new Date().toISOString() + ' ' + line + '\n'); } catch { /* */ }
+  if (!aaat || !row) return false;
+  const payload = (row.payload || {}) as { deviceTrust?: Record<string, string> };
+  payload.deviceTrust = { ...(payload.deviceTrust || {}), aaat, ...(usdi ? { usdi } : {}) };
+  row.payload = payload as Record<string, unknown>;
+  row.trusted = true; row.trustedAt = new Date();
+  await bet365DeviceRepo().save(row);
+  return true;
+}
 
 const uid = (req: FastifyRequest): string | undefined => req.userData?.userId;
 
@@ -401,6 +449,12 @@ export const createNoDelayAccount = async (req: FastifyRequest, reply: FastifyRe
     });
     await accRepo().save(acc);
 
+    // bet365: gera o device DA CONTA já na criação (fingerprint da máquina + usdi/uqid próprio) → cada conta
+    // tem o seu (o aaat vem no 1º login). Ver [[bet365-multiaccount-device]].
+    if (house.noDelayPlatform === 'bet365') {
+      try { await getBet365DeviceForAccount(acc.id); } catch { /* gera no connect se falhar */ }
+    }
+
     return reply.code(201).send(createResponse(1, 'Conta adicionada.', serializeAccount(acc)));
   } catch (error) {
     return reply.code(500).send(createResponse(0, 'Erro ao adicionar conta.', { error: (error as Error).message }));
@@ -603,13 +657,12 @@ async function connectSuperbet(acc: NoDelayAccount, username: string, password: 
  * e retorna o SALDO. O device (fingerprint/canvas/...) é da MÁQUINA (BET365_DEVICE_PATH), não da conta.
  */
 async function connectBet365(acc: NoDelayAccount, username: string, password: string, reply: FastifyReply) {
-  // Device DA CONTA (cofre) — cada conta tem o SEU (senão compartilham device-trust e se invalidam). Fallback = máquina.
-  let existing: { device?: Bet365Device } = {};
-  try { existing = JSON.parse(safeDecrypt(acc.encAuthToken) || '{}'); } catch { /* sem device provisionado */ }
-  const device = resolveBet365Device(existing);
+  // Device DA CONTA (entidade bet365_devices) — gera na 1ª vez. Cada conta tem o SEU (senão compartilham
+  // device-trust e se invalidam). Fallback = device da máquina (só serve p/ 1 conta).
+  const device = await getBet365DeviceForAccount(acc.id);
   if (!device) {
     acc.status = NoDelayAccountStatus.LOGIN_FAILED;
-    acc.lastError = 'Device bet365 não provisionado p/ esta conta (nem device de máquina). Provisione o device da conta.';
+    acc.lastError = 'Device bet365 não provisionado (nem device base na máquina p/ gerar).';
     await accRepo().save(acc);
     return reply.code(200).send(createResponse(0, acc.lastError, serializeAccount(acc)));
   }
@@ -624,8 +677,7 @@ async function connectBet365(acc: NoDelayAccount, username: string, password: st
       return reply.code(200).send(createResponse(0, acc.lastError, serializeAccount(acc)));
     }
     const sess = client.exportSession();
-    // Guarda o device JUNTO da sessão → a conta carrega o SEU device em toda aposta (não o da máquina).
-    acc.encAuthToken = encryptSecret(JSON.stringify({ cookies: sess.cookies, pstk: sess.pstk, b: sess.b, ir: sess.ir, device }));
+    acc.encAuthToken = encryptSecret(JSON.stringify({ cookies: sess.cookies, pstk: sess.pstk, b: sess.b, ir: sess.ir }));
     acc.encJweToken = null;
     acc.externalUserId = client.externalUserId ?? null;
     acc.sessionAt = new Date();
@@ -638,6 +690,9 @@ async function connectBet365(acc: NoDelayAccount, username: string, password: st
       acc.balanceAt = new Date();
     } catch { /* saldo entra no próximo refresh */ }
     await accRepo().save(acc);
+    // Captura o `aaat` que o bet365 emitiu no login (device-trust DA CONTA) → grava na entidade do device.
+    await captureBet365Trust(acc.id, sess.cookies);
+    if (sess.cookies['aaat']) { device.deviceTrust.aaat = sess.cookies['aaat']; if (sess.cookies['usdi']) device.deviceTrust.usdi = sess.cookies['usdi']; }
     // Sobe a instância QUENTE já no connect (background) → a 1ª aposta já acha quente, sem "aposta de aquecimento".
     prewarmBet365Client(acc.id, device, { cookies: sess.cookies, pstk: sess.pstk, b: sess.b, ir: sess.ir });
     return reply.send(createResponse(1, 'Conta conectada.', serializeAccount(acc)));
@@ -969,19 +1024,6 @@ export const placeSuperbetBet = async (req: FastifyRequest, reply: FastifyReply)
   }
 };
 
-/**
- * Device do bet365 POR CONTA (≠ Superbet, que gera com newSuperbetDevice). Cada conta DEVE ter o SEU device
- * (fingerprint + device-trust aaat/usdi): o bet365 amarra a sessão de aposta ao device, então contas que
- * COMPARTILHAM o mesmo device (ex.: o da máquina) se invalidam ({sr:8,"invalid_login"}) quando há >1 conta —
- * ativar/apostar na conta B derruba a sessão da A. Preferimos o device salvo no cofre da conta; fallback = device
- * da máquina (compat p/ conta única ainda não provisionada). Ver [[bet365-nodelay-login]].
- */
-function resolveBet365Device(blob: { device?: Bet365Device } | null | undefined): Bet365Device | null {
-  const d = blob?.device;
-  if (d && d.fingerprint && Array.isArray(d.canvasDumps) && d.syscolors && d.deviceTrust && d.cf3 != null && d.cf4 != null) return d;
-  return loadBet365Device(); // fallback: device da máquina (só serve p/ 1 conta por vez)
-}
-
 // ─── Instância bet365 QUENTE e persistente por conta ─────────────────────────────────────────
 // A ideia do dono: "quando a conta conecta, roda uma instância que persiste, guardando tudo que precisa".
 // warmBetting() (collectState 2x + bumpIr ~31 GETs sequenciais + geostore + warmSession + spawn do worker
@@ -1107,12 +1149,12 @@ export const placeBet365Bet = async (req: FastifyRequest, reply: FastifyReply) =
       try { require('fs').appendFileSync('/tmp/bet365_place_debug.log', JSON.stringify(__dbg) + '\n'); } catch { /* */ }
     }
 
-    let blob: { cookies?: Record<string, string>; pstk?: string; b?: string; ir?: number; device?: Bet365Device } = {};
+    let blob: { cookies?: Record<string, string>; pstk?: string; b?: string; ir?: number } = {};
     try { blob = JSON.parse(safeDecrypt(acc.encAuthToken) || '{}'); } catch { /* ilegível */ }
     if (!blob.cookies) return reply.code(409).send(createResponse(0, 'Sessão bet365 ilegível. Reconecte a conta.', []));
 
-    const device = resolveBet365Device(blob); // device DA CONTA (cofre) → fallback device da máquina
-    if (!device) return reply.code(409).send(createResponse(0, 'Device bet365 não provisionado nesta máquina.', []));
+    const device = await getBet365DeviceForAccount(acc.id); // device DA CONTA (entidade) → fallback device da máquina
+    if (!device) return reply.code(409).send(createResponse(0, 'Device bet365 não provisionado.', []));
 
     // Instância QUENTE persistente: aquece 1× e reusa (a aposta seguinte é só mint+POST). NÃO fecha no fim.
     const client = await getWarmBet365Client(acc.id, device, blob);
@@ -1127,11 +1169,13 @@ export const placeBet365Bet = async (req: FastifyRequest, reply: FastifyReply) =
       const pj = (placebet && typeof placebet === 'object' ? placebet : {}) as { cs?: number; br?: string; mi?: string; bt?: Array<{ od?: string }> };
       const ok = !!pj.br || pj.cs === 1; // `br` = comprovante da aposta; cs:1 = aceito
       console.log(`[nodelay/bet365-bet] acc=${acc.id} ok=${ok} stake=${stake} bg=${(addbet as { bg?: string })?.bg ?? '-'} br=${pj.br ?? '-'} elapsed=${elapsedMs}ms`);
-      // Persiste o estado atualizado (cookies+pstk+b+ir+device) como backup p/ cold-start — FORA do caminho da resposta.
+      // Persiste o estado atualizado (cookies+pstk+b+ir) como backup p/ cold-start — FORA do caminho da resposta.
+      // (o device fica na entidade bet365_devices, não no cofre.) Se o bet365 emitiu aaat novo, atualiza o device.
       try {
         const sess = client.exportSession();
-        acc.encAuthToken = encryptSecret(JSON.stringify({ cookies: sess.cookies, pstk: sess.pstk, b: sess.b, ir: sess.ir, device }));
+        acc.encAuthToken = encryptSecret(JSON.stringify({ cookies: sess.cookies, pstk: sess.pstk, b: sess.b, ir: sess.ir }));
         void accRepo().save(acc).catch(() => { /* ignora */ });
+        if (sess.cookies['aaat'] && sess.cookies['aaat'] !== device.deviceTrust.aaat) void captureBet365Trust(acc.id, sess.cookies).catch(() => { /* */ });
       } catch { /* ignora */ }
       // ODD MUDOU (o usuário NÃO tinha aceitado): devolve estruturado p/ o frontend perguntar "apostar na nova odd?".
       if (!ok && pj.cs === 2 && pj.mi === 'selections_changed') {
