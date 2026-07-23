@@ -8,7 +8,7 @@ import { encryptSecret, decryptSecret, isEncryptionConfigured } from '../utils/c
 import { getRogueAnonToken, getRogueLoginToken } from '../services/nodelay/rogue-token.service';
 import { biahostedLogin, biahostedBalance, biahostedSb2Token } from '../services/nodelay/biahosted-login.service';
 import { SuperbetClient, SuperbetMfaError, newSuperbetDevice, SuperbetDevice } from '../betbot/superbet/superbet-client';
-import { Bet365Account } from '../betbot/bet365/account';
+import { Bet365Account, Bet365Device } from '../betbot/bet365/account';
 import { loadBet365Device } from '../betbot/bet365/device';
 import { buildAddbetBody, buildPlacebetBody, selectionFromPlaceable } from '../betbot/bet365/betslip';
 import { placeBiahostedBet, deriveBetUrl, deriveAuthUrl, AltenarBetMarket } from '../services/nodelay/biahosted-bet.service';
@@ -603,10 +603,13 @@ async function connectSuperbet(acc: NoDelayAccount, username: string, password: 
  * e retorna o SALDO. O device (fingerprint/canvas/...) é da MÁQUINA (BET365_DEVICE_PATH), não da conta.
  */
 async function connectBet365(acc: NoDelayAccount, username: string, password: string, reply: FastifyReply) {
-  const device = loadBet365Device();
+  // Device DA CONTA (cofre) — cada conta tem o SEU (senão compartilham device-trust e se invalidam). Fallback = máquina.
+  let existing: { device?: Bet365Device } = {};
+  try { existing = JSON.parse(safeDecrypt(acc.encAuthToken) || '{}'); } catch { /* sem device provisionado */ }
+  const device = resolveBet365Device(existing);
   if (!device) {
     acc.status = NoDelayAccountStatus.LOGIN_FAILED;
-    acc.lastError = 'Device bet365 não provisionado nesta máquina (defina BET365_DEVICE_PATH).';
+    acc.lastError = 'Device bet365 não provisionado p/ esta conta (nem device de máquina). Provisione o device da conta.';
     await accRepo().save(acc);
     return reply.code(200).send(createResponse(0, acc.lastError, serializeAccount(acc)));
   }
@@ -621,7 +624,8 @@ async function connectBet365(acc: NoDelayAccount, username: string, password: st
       return reply.code(200).send(createResponse(0, acc.lastError, serializeAccount(acc)));
     }
     const sess = client.exportSession();
-    acc.encAuthToken = encryptSecret(JSON.stringify({ cookies: sess.cookies, pstk: sess.pstk, b: sess.b, ir: sess.ir }));
+    // Guarda o device JUNTO da sessão → a conta carrega o SEU device em toda aposta (não o da máquina).
+    acc.encAuthToken = encryptSecret(JSON.stringify({ cookies: sess.cookies, pstk: sess.pstk, b: sess.b, ir: sess.ir, device }));
     acc.encJweToken = null;
     acc.externalUserId = client.externalUserId ?? null;
     acc.sessionAt = new Date();
@@ -965,6 +969,19 @@ export const placeSuperbetBet = async (req: FastifyRequest, reply: FastifyReply)
   }
 };
 
+/**
+ * Device do bet365 POR CONTA (≠ Superbet, que gera com newSuperbetDevice). Cada conta DEVE ter o SEU device
+ * (fingerprint + device-trust aaat/usdi): o bet365 amarra a sessão de aposta ao device, então contas que
+ * COMPARTILHAM o mesmo device (ex.: o da máquina) se invalidam ({sr:8,"invalid_login"}) quando há >1 conta —
+ * ativar/apostar na conta B derruba a sessão da A. Preferimos o device salvo no cofre da conta; fallback = device
+ * da máquina (compat p/ conta única ainda não provisionada). Ver [[bet365-nodelay-login]].
+ */
+function resolveBet365Device(blob: { device?: Bet365Device } | null | undefined): Bet365Device | null {
+  const d = blob?.device;
+  if (d && d.fingerprint && Array.isArray(d.canvasDumps) && d.syscolors && d.deviceTrust && d.cf3 != null && d.cf4 != null) return d;
+  return loadBet365Device(); // fallback: device da máquina (só serve p/ 1 conta por vez)
+}
+
 // ─── Instância bet365 QUENTE e persistente por conta ─────────────────────────────────────────
 // A ideia do dono: "quando a conta conecta, roda uma instância que persiste, guardando tudo que precisa".
 // warmBetting() (collectState 2x + bumpIr ~31 GETs sequenciais + geostore + warmSession + spawn do worker
@@ -1090,12 +1107,12 @@ export const placeBet365Bet = async (req: FastifyRequest, reply: FastifyReply) =
       try { require('fs').appendFileSync('/tmp/bet365_place_debug.log', JSON.stringify(__dbg) + '\n'); } catch { /* */ }
     }
 
-    const device = loadBet365Device();
-    if (!device) return reply.code(409).send(createResponse(0, 'Device bet365 não provisionado nesta máquina.', []));
-
-    let blob: { cookies?: Record<string, string>; pstk?: string; b?: string; ir?: number } = {};
+    let blob: { cookies?: Record<string, string>; pstk?: string; b?: string; ir?: number; device?: Bet365Device } = {};
     try { blob = JSON.parse(safeDecrypt(acc.encAuthToken) || '{}'); } catch { /* ilegível */ }
     if (!blob.cookies) return reply.code(409).send(createResponse(0, 'Sessão bet365 ilegível. Reconecte a conta.', []));
+
+    const device = resolveBet365Device(blob); // device DA CONTA (cofre) → fallback device da máquina
+    if (!device) return reply.code(409).send(createResponse(0, 'Device bet365 não provisionado nesta máquina.', []));
 
     // Instância QUENTE persistente: aquece 1× e reusa (a aposta seguinte é só mint+POST). NÃO fecha no fim.
     const client = await getWarmBet365Client(acc.id, device, blob);
@@ -1110,10 +1127,10 @@ export const placeBet365Bet = async (req: FastifyRequest, reply: FastifyReply) =
       const pj = (placebet && typeof placebet === 'object' ? placebet : {}) as { cs?: number; br?: string; mi?: string; bt?: Array<{ od?: string }> };
       const ok = !!pj.br || pj.cs === 1; // `br` = comprovante da aposta; cs:1 = aceito
       console.log(`[nodelay/bet365-bet] acc=${acc.id} ok=${ok} stake=${stake} bg=${(addbet as { bg?: string })?.bg ?? '-'} br=${pj.br ?? '-'} elapsed=${elapsedMs}ms`);
-      // Persiste o estado atualizado (cookies+pstk+b+ir) como backup p/ cold-start — FORA do caminho da resposta.
+      // Persiste o estado atualizado (cookies+pstk+b+ir+device) como backup p/ cold-start — FORA do caminho da resposta.
       try {
         const sess = client.exportSession();
-        acc.encAuthToken = encryptSecret(JSON.stringify({ cookies: sess.cookies, pstk: sess.pstk, b: sess.b, ir: sess.ir }));
+        acc.encAuthToken = encryptSecret(JSON.stringify({ cookies: sess.cookies, pstk: sess.pstk, b: sess.b, ir: sess.ir, device }));
         void accRepo().save(acc).catch(() => { /* ignora */ });
       } catch { /* ignora */ }
       // ODD MUDOU (o usuário NÃO tinha aceitado): devolve estruturado p/ o frontend perguntar "apostar na nova odd?".
