@@ -634,6 +634,8 @@ async function connectBet365(acc: NoDelayAccount, username: string, password: st
       acc.balanceAt = new Date();
     } catch { /* saldo entra no próximo refresh */ }
     await accRepo().save(acc);
+    // Sobe a instância QUENTE já no connect (background) → a 1ª aposta já acha quente, sem "aposta de aquecimento".
+    prewarmBet365Client(acc.id, device, { cookies: sess.cookies, pstk: sess.pstk, b: sess.b, ir: sess.ir });
     return reply.send(createResponse(1, 'Conta conectada.', serializeAccount(acc)));
   } catch (e) {
     acc.sessionAt = null;
@@ -967,18 +969,37 @@ export const placeSuperbetBet = async (req: FastifyRequest, reply: FastifyReply)
 // A ideia do dono: "quando a conta conecta, roda uma instância que persiste, guardando tudo que precisa".
 // warmBetting() (collectState 2x + bumpIr ~31 GETs sequenciais + geostore + warmSession + spawn do worker
 // python + handshake TLS) custa ~8-10s e ANTES rodava a CADA aposta (cliente novo por request → destruído no
-// finally). Aqui a instância fica viva e QUENTE: aquece 1× e cada aposta seguinte é só mint + 2 POSTs (~1-2s,
-// no nível da bet365 nativa). Reusa o worker python, a conexão TLS keep-alive, o i_r já bombado e os cookies
-// de ativação (gwt/swt/session). Re-aquece se passar do TTL ou se a aposta falhar. Evict no disconnect.
-type WarmBet365 = { client: Bet365Account; warmedAt: number; usedAt: number; warming: Promise<void> | null };
+// finally). Aqui a instância sobe QUENTE já no CONNECT (prewarmBet365Client) e um HEARTBEAT a mantém viva
+// enquanto a conta está conectada → TODA aposta (inclusive a 1ª) é só mint + 2 POSTs (~1-2s, no nível da bet365
+// nativa), sem "aposta de aquecimento". Reusa worker python + TLS keep-alive + i_r bombado + cookies de ativação.
+// Evict no disconnect / status≠conectado. Idle-evict é só backstop (o heartbeat mantém usedAt fresco).
+type WarmBet365 = { client: Bet365Account; warmedAt: number; usedAt: number; warming: Promise<void> | null; timer: ReturnType<typeof setInterval> | null };
 const bet365WarmPool = new Map<string, WarmBet365>();
-const BET365_WARM_TTL_MS = 120_000; // re-aquece se > 2min desde o último warmBetting (cookies/gwt podem vencer)
-const BET365_IDLE_EVICT_MS = 900_000; // descarta a instância (libera worker) se ficar 15min sem apostar
+const BET365_WARM_TTL_MS = 120_000;    // re-aquece na aposta se > 2min sem refresh (backstop; o heartbeat evita)
+const BET365_HEARTBEAT_MS = 90_000;    // mantém gwt/SST/session/__cf_bm vivos enquanto conectado (< TTL)
+const BET365_IDLE_EVICT_MS = 1_800_000; // backstop: se o heartbeat morrer, libera o worker após 30min sem uso
 
-/** Descarta instâncias paradas há muito tempo (libera worker python + engine). Chamado a cada aposta. */
+/** Mantém a sessão de aposta viva enquanto a conta está conectada (heartbeat). Idempotente. */
+function startBet365Heartbeat(accId: string): void {
+  const e = bet365WarmPool.get(accId);
+  if (!e || e.timer) return; // já tem heartbeat
+  e.timer = setInterval(() => {
+    const cur = bet365WarmPool.get(accId);
+    if (!cur || cur.warming) return; // aposta/re-warm em curso → pula esse tick
+    const p = cur.client.refreshBettingSession(); // gwt + SST + session, sem re-bumpar i_r
+    cur.warming = p;
+    p.then(() => { const now = Date.now(); cur.warmedAt = now; cur.usedAt = now; })
+      .catch(() => { cur.warmedAt = 0; }) // sessão pode ter caído → próxima aposta re-aquece
+      .finally(() => { cur.warming = null; });
+  }, BET365_HEARTBEAT_MS);
+  e.timer.unref?.(); // não segura o processo vivo
+}
+
+/** Descarta instâncias órfãs (heartbeat morto) há muito tempo — backstop. Chamado a cada aposta. */
 function sweepIdleBet365(nowMs: number): void {
   for (const [id, e] of bet365WarmPool) {
     if (!e.warming && nowMs - e.usedAt > BET365_IDLE_EVICT_MS) {
+      if (e.timer) clearInterval(e.timer);
       bet365WarmPool.delete(id);
       e.client.close().catch(() => { /* best-effort */ });
     }
@@ -993,32 +1014,45 @@ async function getWarmBet365Client(
   const now = Date.now();
   sweepIdleBet365(now);
   const existing = bet365WarmPool.get(accId);
-  if (existing) existing.usedAt = now;
   if (existing) {
-    if (existing.warming) { await existing.warming; return existing.client; } // outra aposta já está aquecendo
-    if (Date.now() - existing.warmedAt < BET365_WARM_TTL_MS) return existing.client; // quente → usa direto
-    const p = existing.client.warmBetting(); // stale → re-aquece o MESMO cliente (mantém cookies/i_r quentes)
+    existing.usedAt = now;
+    if (existing.warming) { await existing.warming; return existing.client; } // aposta/heartbeat em curso
+    if (now - existing.warmedAt < BET365_WARM_TTL_MS) { startBet365Heartbeat(accId); return existing.client; } // quente
+    const p = existing.client.warmBetting(); // stale (heartbeat falhou) → re-aquece o MESMO cliente (mantém cookies/i_r)
     existing.warming = p;
     try { await p; existing.warmedAt = Date.now(); } finally { existing.warming = null; }
+    startBet365Heartbeat(accId);
     return existing.client;
   }
   // 1ª vez (ou pós-restart): cria, reidrata do cofre e aquece uma única vez.
   const client = new Bet365Account({ device });
   client.restoreSession(blob.cookies || {}, blob.pstk, { b: blob.b, ir: blob.ir });
-  const entry: WarmBet365 = { client, warmedAt: 0, usedAt: now, warming: null };
+  const entry: WarmBet365 = { client, warmedAt: 0, usedAt: now, warming: null, timer: null };
   bet365WarmPool.set(accId, entry);
   const p = client.warmBetting();
   entry.warming = p;
   try { await p; entry.warmedAt = Date.now(); }
   catch (e) { bet365WarmPool.delete(accId); await client.close().catch(() => { /* */ }); throw e; }
   finally { entry.warming = null; }
+  startBet365Heartbeat(accId);
   return client;
 }
 
-/** Descarta a instância quente da conta (disconnect / sessão caída) — libera worker python + engine nst. */
+/** Aquece a instância da conta em BACKGROUND (chamado no connect) → a 1ª aposta já acha quente. */
+function prewarmBet365Client(
+  accId: string,
+  device: NonNullable<ReturnType<typeof loadBet365Device>>,
+  blob: { cookies?: Record<string, string>; pstk?: string; b?: string; ir?: number },
+): void {
+  if (bet365WarmPool.has(accId)) return; // já quente
+  void getWarmBet365Client(accId, device, blob).catch(() => { /* a 1ª aposta re-aquece se isto falhar */ });
+}
+
+/** Descarta a instância quente da conta (disconnect / sessão caída) — para o heartbeat + libera worker + engine. */
 async function evictBet365Warm(accId: string): Promise<void> {
   const e = bet365WarmPool.get(accId);
   if (!e) return;
+  if (e.timer) clearInterval(e.timer);
   bet365WarmPool.delete(accId);
   await e.client.close().catch(() => { /* best-effort */ });
 }

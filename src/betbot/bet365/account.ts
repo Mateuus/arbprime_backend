@@ -365,6 +365,16 @@ export class Bet365Account {
     this.warm = await this.engine.warmSession({ session: this.sessionCtx(), sst: this.sst });
   }
 
+  /**
+   * HEARTBEAT: mantém a sessão de APOSTA viva enquanto a conta está conectada — refaz gwt (geostore) + SST +
+   * swt/session + __cf_bm (via collectState dentro do activate), SEM re-bumpar i_r nem reconstruir a warm
+   * session. Chamado de tempos em tempos pelo pool → toda aposta acha a instância quente (sem "aposta de
+   * aquecimento"). Precisa de warmBetting() antes (define a base). Ver [[bet365-nodelay-betting]].
+   */
+  async refreshBettingSession(): Promise<void> {
+    await this.activateBettingSession();
+  }
+
   /** Garante um SST recente (refetch se >~20s). */
   private async freshSst(): Promise<string> {
     if (!this.sst || Date.now() - this.sstAt > 20000) await this.collectState();
