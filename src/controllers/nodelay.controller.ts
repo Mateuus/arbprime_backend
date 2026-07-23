@@ -963,6 +963,66 @@ export const placeSuperbetBet = async (req: FastifyRequest, reply: FastifyReply)
   }
 };
 
+// ─── Instância bet365 QUENTE e persistente por conta ─────────────────────────────────────────
+// A ideia do dono: "quando a conta conecta, roda uma instância que persiste, guardando tudo que precisa".
+// warmBetting() (collectState 2x + bumpIr ~31 GETs sequenciais + geostore + warmSession + spawn do worker
+// python + handshake TLS) custa ~8-10s e ANTES rodava a CADA aposta (cliente novo por request → destruído no
+// finally). Aqui a instância fica viva e QUENTE: aquece 1× e cada aposta seguinte é só mint + 2 POSTs (~1-2s,
+// no nível da bet365 nativa). Reusa o worker python, a conexão TLS keep-alive, o i_r já bombado e os cookies
+// de ativação (gwt/swt/session). Re-aquece se passar do TTL ou se a aposta falhar. Evict no disconnect.
+type WarmBet365 = { client: Bet365Account; warmedAt: number; usedAt: number; warming: Promise<void> | null };
+const bet365WarmPool = new Map<string, WarmBet365>();
+const BET365_WARM_TTL_MS = 120_000; // re-aquece se > 2min desde o último warmBetting (cookies/gwt podem vencer)
+const BET365_IDLE_EVICT_MS = 900_000; // descarta a instância (libera worker) se ficar 15min sem apostar
+
+/** Descarta instâncias paradas há muito tempo (libera worker python + engine). Chamado a cada aposta. */
+function sweepIdleBet365(nowMs: number): void {
+  for (const [id, e] of bet365WarmPool) {
+    if (!e.warming && nowMs - e.usedAt > BET365_IDLE_EVICT_MS) {
+      bet365WarmPool.delete(id);
+      e.client.close().catch(() => { /* best-effort */ });
+    }
+  }
+}
+
+async function getWarmBet365Client(
+  accId: string,
+  device: NonNullable<ReturnType<typeof loadBet365Device>>,
+  blob: { cookies?: Record<string, string>; pstk?: string; b?: string; ir?: number },
+): Promise<Bet365Account> {
+  const now = Date.now();
+  sweepIdleBet365(now);
+  const existing = bet365WarmPool.get(accId);
+  if (existing) existing.usedAt = now;
+  if (existing) {
+    if (existing.warming) { await existing.warming; return existing.client; } // outra aposta já está aquecendo
+    if (Date.now() - existing.warmedAt < BET365_WARM_TTL_MS) return existing.client; // quente → usa direto
+    const p = existing.client.warmBetting(); // stale → re-aquece o MESMO cliente (mantém cookies/i_r quentes)
+    existing.warming = p;
+    try { await p; existing.warmedAt = Date.now(); } finally { existing.warming = null; }
+    return existing.client;
+  }
+  // 1ª vez (ou pós-restart): cria, reidrata do cofre e aquece uma única vez.
+  const client = new Bet365Account({ device });
+  client.restoreSession(blob.cookies || {}, blob.pstk, { b: blob.b, ir: blob.ir });
+  const entry: WarmBet365 = { client, warmedAt: 0, usedAt: now, warming: null };
+  bet365WarmPool.set(accId, entry);
+  const p = client.warmBetting();
+  entry.warming = p;
+  try { await p; entry.warmedAt = Date.now(); }
+  catch (e) { bet365WarmPool.delete(accId); await client.close().catch(() => { /* */ }); throw e; }
+  finally { entry.warming = null; }
+  return client;
+}
+
+/** Descarta a instância quente da conta (disconnect / sessão caída) — libera worker python + engine nst. */
+async function evictBet365Warm(accId: string): Promise<void> {
+  const e = bet365WarmPool.get(accId);
+  if (!e) return;
+  bet365WarmPool.delete(accId);
+  await e.client.close().catch(() => { /* best-effort */ });
+}
+
 // POST /nodelay/accounts/:id/bet365-bet { eventId, placeable:{selectionId,mt,odd}, line?, stake, acceptOddsChange? }
 // Aposta na bet365 (addbet→placebet) 100% headless no BACKEND: reidrata a sessão (cookies+pstk do
 // cofre) + o device da MÁQUINA (BET365_DEVICE_PATH), aquece o contexto nst (warmBetting ~540ms) e
@@ -989,10 +1049,12 @@ export const placeBet365Bet = async (req: FastifyRequest, reply: FastifyReply) =
 
     const sel = selectionFromPlaceable(b.placeable, String(b.eventId), b.line);
     if (!sel) return reply.code(400).send(createResponse(0, 'Seleção bet365 não apostável (faltam fp/mt/od).', []));
-    // DEBUG: mostra o que o FRONT mandou + o body do addbet (console + arquivo p/ eu ler).
-    const __dbg = { at: new Date().toISOString(), placeableDoFront: b.placeable, sel, addbetBody: buildAddbetBody(sel), stake };
-    console.log(`[nodelay/bet365-bet] ${JSON.stringify(__dbg)}`);
-    try { require('fs').appendFileSync('/tmp/bet365_place_debug.log', JSON.stringify(__dbg) + '\n'); } catch { /* */ }
+    // DEBUG (só com BET365_DEBUG=1): o que o FRONT mandou + o body do addbet.
+    if (process.env.BET365_DEBUG) {
+      const __dbg = { at: new Date().toISOString(), placeableDoFront: b.placeable, sel, addbetBody: buildAddbetBody(sel), stake };
+      console.log(`[nodelay/bet365-bet] ${JSON.stringify(__dbg)}`);
+      try { require('fs').appendFileSync('/tmp/bet365_place_debug.log', JSON.stringify(__dbg) + '\n'); } catch { /* */ }
+    }
 
     const device = loadBet365Device();
     if (!device) return reply.code(409).send(createResponse(0, 'Device bet365 não provisionado nesta máquina.', []));
@@ -1001,11 +1063,10 @@ export const placeBet365Bet = async (req: FastifyRequest, reply: FastifyReply) =
     try { blob = JSON.parse(safeDecrypt(acc.encAuthToken) || '{}'); } catch { /* ilegível */ }
     if (!blob.cookies) return reply.code(409).send(createResponse(0, 'Sessão bet365 ilegível. Reconecte a conta.', []));
 
-    const client = new Bet365Account({ device });
+    // Instância QUENTE persistente: aquece 1× e reusa (a aposta seguinte é só mint+POST). NÃO fecha no fim.
+    const client = await getWarmBet365Client(acc.id, device, blob);
     try {
-      client.restoreSession(blob.cookies, blob.pstk, { b: blob.b, ir: blob.ir });
       client.setBetContext({ ipv6: b.ipv6, geo: b.geo }); // ipv6/geo REAIS do usuário (frontend) → nst autêntico
-      await client.warmBetting();
       const started = Date.now();
       const { addbet, placebet } = await client.placeBet({
         addbetBody: buildAddbetBody(sel),
@@ -1015,11 +1076,11 @@ export const placeBet365Bet = async (req: FastifyRequest, reply: FastifyReply) =
       const pj = (placebet && typeof placebet === 'object' ? placebet : {}) as { cs?: number; br?: string; mi?: string; bt?: Array<{ od?: string }> };
       const ok = !!pj.br || pj.cs === 1; // `br` = comprovante da aposta; cs:1 = aceito
       console.log(`[nodelay/bet365-bet] acc=${acc.id} ok=${ok} stake=${stake} bg=${(addbet as { bg?: string })?.bg ?? '-'} br=${pj.br ?? '-'} elapsed=${elapsedMs}ms`);
-      // Persiste cookies atualizados (mantém a sessão fresca) — best-effort.
+      // Persiste o estado atualizado (cookies+pstk+b+ir) como backup p/ cold-start — FORA do caminho da resposta.
       try {
         const sess = client.exportSession();
-        acc.encAuthToken = encryptSecret(JSON.stringify({ cookies: sess.cookies, pstk: sess.pstk }));
-        await accRepo().save(acc);
+        acc.encAuthToken = encryptSecret(JSON.stringify({ cookies: sess.cookies, pstk: sess.pstk, b: sess.b, ir: sess.ir }));
+        void accRepo().save(acc).catch(() => { /* ignora */ });
       } catch { /* ignora */ }
       // ODD MUDOU (o usuário NÃO tinha aceitado): devolve estruturado p/ o frontend perguntar "apostar na nova odd?".
       if (!ok && pj.cs === 2 && pj.mi === 'selections_changed') {
@@ -1030,14 +1091,16 @@ export const placeBet365Bet = async (req: FastifyRequest, reply: FastifyReply) =
       }
       if (!ok) return reply.code(200).send(createResponse(0, 'Aposta recusada pela bet365.', { addbet, placebet, elapsedMs }));
       return reply.send(createResponse(1, 'Aposta feita.', { betId: pj.br ?? (addbet as { bg?: string })?.bg, placedOdds: sel.od, addbet, placebet, elapsedMs }));
-    } finally {
-      await client.close().catch(() => { /* best-effort */ });
+    } catch (errPlace) {
+      // Falha no disparo: a sessão pode ter caído → força re-aquecer o MESMO cliente na próxima aposta (mantém ir/cookies).
+      const e = bet365WarmPool.get(acc.id); if (e) e.warmedAt = 0;
+      throw errPlace;
     }
   } catch (error) {
     // buildPlacebetBody lança em cs≠1 ("addbet recusado …") → cai aqui como recusa da casa (200).
     const msg = (error as Error)?.message || 'Falha ao apostar na bet365.';
     console.log(`[nodelay/bet365-bet] REJEITADO: ${msg}`);
-    try { require('fs').appendFileSync('/tmp/bet365_place_debug.log', JSON.stringify({ at: new Date().toISOString(), REJEITADO: msg }) + '\n'); } catch { /* */ }
+    try { process.env.BET365_DEBUG && require('fs').appendFileSync('/tmp/bet365_place_debug.log',JSON.stringify({ at: new Date().toISOString(), REJEITADO: msg }) + '\n'); } catch { /* */ }
     const code = /addbet recusado/i.test(msg) ? 200 : 502;
     return reply.code(code).send(createResponse(0, msg, { error: msg }));
   }
@@ -1092,6 +1155,7 @@ export const clearNoDelaySession = async (req: FastifyRequest, reply: FastifyRep
     acc.status = NoDelayAccountStatus.DISCONNECTED;
     acc.lastError = null;
     await accRepo().save(acc);
+    await evictBet365Warm(acc.id); // libera a instância quente (worker python + engine nst)
 
     return reply.send(createResponse(1, 'Conta desconectada.', serializeAccount(acc)));
   } catch (error) {
@@ -1120,6 +1184,7 @@ export const setNoDelayStatus = async (req: FastifyRequest, reply: FastifyReply)
       acc.encAuthToken = null;
       acc.encJweToken = null;
       acc.sessionAt = null;
+      await evictBet365Warm(acc.id); // sessão caiu → descarta a instância quente
     }
 
     await accRepo().save(acc);

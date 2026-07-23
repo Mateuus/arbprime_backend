@@ -16,6 +16,10 @@ import { ZapClient } from './zap-client';
 import { Proxy } from '../http';
 import { randomBytes, randomUUID } from 'crypto';
 
+// Logs de diagnóstico da aposta (SÍNCRONOS no hot path) só com BET365_DEBUG=1. Em produção ficam off
+// (o `&&` curto-circuita antes de avaliar os argumentos, então nem o JSON.stringify/decode roda).
+const BET365_DEBUG = !!process.env.BET365_DEBUG;
+
 /**
  * Parser flexível do saldo da bet365. A resposta do balanceapi ainda não foi capturada com body;
  * a bet365 costuma responder key=value delimitado (ex.: "AC=...,AB=1234.56,...") OU JSON.
@@ -157,7 +161,7 @@ export class Bet365Account {
       const m = /CURRENCY_EXCHANGE_RATE["'\s:=]+([0-9]+\.[0-9]{2,6})/i.exec(cfg.body)
         || /"CER"\s*[:=]\s*"?([0-9]+\.[0-9]{2,6})/i.exec(cfg.body);
       if (m) this.betCurrencyRate = parseFloat(m[1]);
-      require('fs').appendFileSync('/tmp/bet365_place_debug.log', JSON.stringify({ currencyRate: { found: m ? m[1] : null, using: this.betCurrencyRate } }) + '\n');
+      BET365_DEBUG && require('fs').appendFileSync('/tmp/bet365_place_debug.log',JSON.stringify({ currencyRate: { found: m ? m[1] : null, using: this.betCurrencyRate } }) + '\n');
     } catch { /* */ }
     // DEBUG: dumpa TODAS as SSTs da config (byte1:len) — achar a autenticada (0xba) se pegamos a errada.
     try {
@@ -165,7 +169,7 @@ export class Bet365Account {
         try { const b = Buffer.from(m[1].slice(0, 88) + '==', 'base64'); return `0x${b[1].toString(16)}:${b.length}`; } catch { return '?'; }
       });
       const b0 = (() => { try { const b = Buffer.from(sst.slice(0, 88) + '==', 'base64'); return `0x${b[1].toString(16)}:${b.length}`; } catch { return '?'; } })();
-      require('fs').appendFileSync('/tmp/bet365_place_debug.log', JSON.stringify({ collectState: { chosen: b0, cfgStatus: cfg.status, allSSTs: all.slice(0, 20), hasCfgH: !!h, cookies: Object.keys(this.http.jar.toObject()) } }) + '\n');
+      BET365_DEBUG && require('fs').appendFileSync('/tmp/bet365_place_debug.log',JSON.stringify({ collectState: { chosen: b0, cfgStatus: cfg.status, allSSTs: all.slice(0, 20), hasCfgH: !!h, cookies: Object.keys(this.http.jar.toObject()) } }) + '\n');
     } catch { /* */ }
     this.sst = sst; this.sstAt = Date.now();
     return { sst, pstk };
@@ -229,7 +233,7 @@ export class Bet365Account {
     // DEBUG: prova da ativação (gwt/swt/session + grade do SST). Remover depois.
     try {
       const b1 = (() => { try { const b = Buffer.from(this.sst.slice(0, 88) + '==', 'base64'); return '0x' + b[1].toString(16) + ':' + b.length; } catch { return '?'; } })();
-      require('fs').appendFileSync('/tmp/bet365_place_debug.log', JSON.stringify({
+      BET365_DEBUG && require('fs').appendFileSync('/tmp/bet365_place_debug.log',JSON.stringify({
         activateBettingSession: {
           geoStatus, geoBody, sstAfter: b1,
           gwt: (this.http.jar.get('gwt') || '').length, swt: (this.http.jar.get('swt') || '').length,
@@ -391,13 +395,13 @@ export class Bet365Account {
     // 1) ADDBET — minta COLD com TODOS os campos (c/n/o/i/j/geo/hash) + POST. warm.mint NÃO serve (sem hash por-jogo).
     const nstA = await this.mintBetNst('/BetsWebAPI/addbet', req.addbetBody, sst);
     // DEBUG: SST (byte1: 0xba=autenticado, 0x45=anon, 0xaa=login) + nst decodificado + cookies vivos.
-    try {
+    if (BET365_DEBUG) try {
       const sstBuf = Buffer.from(String(sst).replace(/=+$/, ''), 'base64');
       const dec = decode.decode(nstA, sst);
-      require('fs').appendFileSync('/tmp/bet365_place_debug.log', JSON.stringify({
+      BET365_DEBUG && require('fs').appendFileSync('/tmp/bet365_place_debug.log',JSON.stringify({
         NST: { sstByte1: '0x' + sstBuf[1].toString(16), sstLen: sstBuf.length, pstk: (this.pstk || '').slice(0, 12), cookies: Object.keys(this.http.jar.toObject()), bHex: this.bHex, ir: this.ir, decoded: dec },
       }) + '\n');
-    } catch (e) { try { require('fs').appendFileSync('/tmp/bet365_place_debug.log', 'NST decode err: ' + (e as Error).message + '\n'); } catch { /* */ } }
+    } catch (e) { try { BET365_DEBUG && require('fs').appendFileSync('/tmp/bet365_place_debug.log','NST decode err: ' + (e as Error).message + '\n'); } catch { /* */ } }
     this.ir++;
     const rA = await this.http.request('post', BASE + '/BetsWebAPI/addbet', { body: req.addbetBody, headers: this.addbetHeaders(nstA) });
     const addbet = rA.json ?? rA.body;
@@ -409,7 +413,7 @@ export class Bet365Account {
     const rP = await this.http.request('post', pb.url.startsWith('http') ? pb.url : BASE + pb.url, { body: pb.body, headers: this.addbetHeaders(nstP) });
     let placebet = rP.json ?? rP.body;
     // DEBUG placebet: url + body + resposta crua p/ diagnosticar recusa. Remover depois.
-    try { require('fs').appendFileSync('/tmp/bet365_place_debug.log', JSON.stringify({ PLACEBET: { url: pb.url.slice(0, 120), body: decodeURIComponent(pb.body).slice(0, 240), status: rP.status, resp: String(rP.body).slice(0, 400) } }) + '\n'); } catch { /* */ }
+    try { BET365_DEBUG && require('fs').appendFileSync('/tmp/bet365_place_debug.log',JSON.stringify({ PLACEBET: { url: pb.url.slice(0, 120), body: decodeURIComponent(pb.body).slice(0, 240), status: rP.status, resp: String(rP.body).slice(0, 400) } }) + '\n'); } catch { /* */ }
 
     // ODDS MUDARAM (mi:selections_changed): a bet365 re-oferece com a odd nova. Re-submete 1× (se o
     // usuário aceita mudança — buildPlacebetBody LANÇA se não aceita, aí mantemos a recusa).
@@ -421,7 +425,7 @@ export class Bet365Account {
         this.ir++;
         const rP2 = await this.http.request('post', pb2.url.startsWith('http') ? pb2.url : BASE + pb2.url, { body: pb2.body, headers: this.addbetHeaders(nstP2) });
         placebet = rP2.json ?? rP2.body;
-        try { require('fs').appendFileSync('/tmp/bet365_place_debug.log', JSON.stringify({ PLACEBET_REOFFER: { url: pb2.url.slice(0, 120), body: decodeURIComponent(pb2.body).slice(0, 240), status: rP2.status, resp: String(rP2.body).slice(0, 400) } }) + '\n'); } catch { /* */ }
+        try { BET365_DEBUG && require('fs').appendFileSync('/tmp/bet365_place_debug.log',JSON.stringify({ PLACEBET_REOFFER: { url: pb2.url.slice(0, 120), body: decodeURIComponent(pb2.body).slice(0, 240), status: rP2.status, resp: String(rP2.body).slice(0, 400) } }) + '\n'); } catch { /* */ }
       } catch { /* acceptOddsChange=false → mantém a recusa por mudança de odd */ }
     }
 
@@ -465,7 +469,7 @@ export class Bet365Account {
         if (this.warm) return this.warm.mint({ url: '/zap', body: '', sst });
         return this.engine.mint({ mode: 'addbet', sst, session: { ...this.sessionCtx(), url: '/zap', body: '' } });
       },
-      debug: (l) => { try { require('fs').appendFileSync('/tmp/bet365_place_debug.log', l + '\n'); } catch { /* */ } },
+      debug: (l) => { try { BET365_DEBUG && require('fs').appendFileSync('/tmp/bet365_place_debug.log',l + '\n'); } catch { /* */ } },
     });
     await this.zap.connect();
     const gameTopic = `${fi}C${cls}A_${lang}`;
