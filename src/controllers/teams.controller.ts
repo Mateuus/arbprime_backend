@@ -8,6 +8,10 @@ import { normalizeName } from "@utils/functions";
 import { rebuildTeamAliasCache } from "@Core/teamAliasCache";
 import { CycleSession } from "../betbot/cycle-session";
 import { sofascoreSearchTeams, pickBestMatch } from "../services/sofascore.service";
+import { ExternalDataSource, ensureExternalDb } from "../database/external-data-source";
+import { EventGroup } from "../database/external/event-group.entity";
+import { EventGroupMember } from "../database/external/event-group-member.entity";
+import { planReconcile, detectCategory, ReconcileGroup, ReconcileMember } from "../services/team-reconcile.service";
 
 /**
  * CURADORIA de Times & Aliases (tabelas `teams` / `team_aliases` do
@@ -18,13 +22,8 @@ import { sofascoreSearchTeams, pickBestMatch } from "../services/sofascore.servi
  * alias fica inerte no lookup.
  */
 
-// senior | sub-NN | feminino — idêntico ao detectCategory do TeamAliasManager.
-function detectCategory(name: string): string {
-  const sub = name.match(/\b(?:sub|u)[-\s]?(\d{2})\b/i);
-  if (sub) return `sub-${sub[1]}`;
-  if (/\b(fem|feminino|women|womens|\(f\)|\(w\))\b/i.test(name)) return "feminino";
-  return "senior";
-}
+// detectCategory (senior | sub-NN | feminino) vem do team-reconcile.service —
+// mesma função usada pela reconciliação, evitando duplicar a regra do matcher.
 
 const VALID_STATUS = ["confirmed", "pending_review"];
 
@@ -470,5 +469,127 @@ export const backfillSofascore = async (req: FastifyRequest, reply: FastifyReply
     return reply.send(createResponse(1, `Backfill: ${results.length} verificados, ${committed} gravados.`, { commit, minConfidence, sport, results }));
   } catch (error) {
     return reply.code(500).send(createResponse(0, "Erro no backfill do SoFaScore.", { error: (error as Error).message }));
+  }
+};
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+/** Times SEM sofascore_id (para o front sugerir rodar o "Buscar IDs faltantes"). */
+async function countTeamsWithoutCrest(): Promise<number> {
+  const row = await teamRepo().createQueryBuilder("t")
+    .leftJoin(TeamSofascore, "s", "s.teamId = t.id")
+    .where("s.teamId IS NULL")
+    .select("COUNT(*)", "cnt")
+    .getRawOne<{ cnt: string }>();
+  return Number(row?.cnt || 0);
+}
+
+// POST /teams/reconcile { commit?, createTeams?, minConfidence? }
+// RECONCILIA o catálogo a partir do event match (event_groups/members):
+// colhe as grafias faltantes como aliases dos times existentes e CRIA os times
+// que faltam (source=auto, status=pending_review). commit=false = só o plano
+// (dry-run/preview). Grava tolerante a duplicata (o matcher insere aliases em
+// paralelo) e reconstrói o cache do Redis. Ver team-reconcile.service.
+export const reconcileCatalog = async (req: FastifyRequest, reply: FastifyReply) => {
+  if (!(await withWriteDb(reply))) return;
+  const body = (req.body || {}) as { commit?: boolean; createTeams?: boolean; minConfidence?: number };
+  const commit = body.commit === true;
+  const createTeams = body.createTeams !== false; // default true
+  const minConfidence = Math.max(0, Math.min(1, Number.isFinite(body.minConfidence) ? Number(body.minConfidence) : 0.8));
+
+  try {
+    // Leitura do event match (read-only) — banco físico é o mesmo da curadoria.
+    try {
+      await ensureExternalDb();
+    } catch (e) {
+      return reply.code(503).send(createResponse(0, `Fonte de eventos (arbbetting) indisponível: ${(e as Error).message}`, []));
+    }
+    const [groupRows, memberRows] = await Promise.all([
+      ExternalDataSource.getRepository(EventGroup).find({ where: { status: "active" }, select: { id: true, sport: true, status: true } }),
+      ExternalDataSource.getRepository(EventGroupMember).find({ where: { disabled: 0 }, select: { groupId: true, orientation: true, confidence: true, home: true, away: true, disabled: true } }),
+    ]);
+    const groups: ReconcileGroup[] = groupRows.map((g) => ({ id: String(g.id), sport: g.sport, status: g.status }));
+    const members: ReconcileMember[] = memberRows.map((m) => ({
+      groupId: String(m.groupId), orientation: m.orientation, confidence: Number(m.confidence),
+      home: m.home, away: m.away, disabled: Number(m.disabled),
+    }));
+
+    // Catálogo atual: mapa de aliases + nomes dos times (p/ enriquecer a amostra).
+    const [aliasRows, teamRows] = await Promise.all([
+      aliasRepo().find({ select: { teamId: true, sport: true, category: true, aliasNorm: true } }),
+      teamRepo().find({ select: { id: true, canonicalName: true } }),
+    ]);
+    const aliasMap = new Map<string, string>();
+    for (const a of aliasRows) aliasMap.set(`${a.sport}|${a.category}|${a.aliasNorm}`, String(a.teamId));
+    const teamNameById = new Map<string, string>();
+    for (const t of teamRows) teamNameById.set(String(t.id), t.canonicalName);
+
+    const plan = planReconcile(groups, members, aliasMap, { createTeams, minConfidence });
+
+    if (commit) {
+      // 1) Cria os times novos (INSERT IGNORE) e re-seleciona os ids gerados.
+      const teamValues = plan.newTeams.map((nt) => ({
+        canonicalName: nt.canonicalName, canonicalNorm: nt.canonicalNorm, sport: nt.sport,
+        category: nt.category, country: null, source: "auto", status: "pending_review",
+      }));
+      for (const c of chunk(teamValues, 500)) {
+        await teamRepo().createQueryBuilder().insert().into(Team).values(c).orIgnore().execute();
+      }
+      const normToId = new Map<string, string>();
+      const norms = [...new Set(plan.newTeams.map((nt) => nt.canonicalNorm))];
+      for (const c of chunk(norms, 1000)) {
+        if (c.length === 0) continue;
+        const rows = await teamRepo().createQueryBuilder("t")
+          .select(["t.id", "t.sport", "t.category", "t.canonicalNorm"])
+          .where("t.canonicalNorm IN (:...norms)", { norms: c })
+          .getMany();
+        for (const r of rows) normToId.set(`${r.sport}|${r.category}|${r.canonicalNorm}`, String(r.id));
+      }
+
+      // 2) Insere os aliases (dos times novos + dos existentes), INSERT IGNORE.
+      const aliasValues: Record<string, unknown>[] = [];
+      for (const nt of plan.newTeams) {
+        const teamId = normToId.get(`${nt.sport}|${nt.category}|${nt.canonicalNorm}`);
+        if (!teamId) continue; // não conseguiu criar/resolver → pula seus aliases
+        for (const a of nt.aliases) {
+          aliasValues.push({ teamId, alias: a.alias, aliasNorm: a.aliasNorm, sport: nt.sport, category: nt.category, bookmaker: null, source: "auto", status: "pending_review", confidence: a.confidence });
+        }
+      }
+      for (const add of plan.aliasAddsExisting) {
+        aliasValues.push({ teamId: add.teamId, alias: add.alias, aliasNorm: add.aliasNorm, sport: add.sport, category: add.category, bookmaker: null, source: "auto", status: "pending_review", confidence: add.confidence });
+      }
+      for (const c of chunk(aliasValues, 500)) {
+        await aliasRepo().createQueryBuilder().insert().into(TeamAlias).values(c).orIgnore().execute();
+      }
+
+      await safeRebuild(); // reflete no cache do Redis na hora
+    }
+
+    const crestlessNow = await countTeamsWithoutCrest();
+    const teamsWithoutCrest = commit ? crestlessNow : crestlessNow + plan.newTeams.length;
+
+    return reply.send(createResponse(1, commit ? "Catálogo reconciliado." : "Prévia da reconciliação.", {
+      committed: commit,
+      createTeams,
+      minConfidence,
+      counts: plan.counts,
+      teamsWithoutCrest,
+      sampleNewTeams: plan.newTeams.slice(0, 50).map((nt) => ({
+        canonicalName: nt.canonicalName, category: nt.category, sport: nt.sport,
+        aliasCount: nt.aliases.length, aliases: nt.aliases.slice(0, 8).map((a) => a.alias),
+      })),
+      sampleAliasAdds: plan.aliasAddsExisting.slice(0, 50).map((a) => ({
+        alias: a.alias, teamId: a.teamId, teamName: teamNameById.get(a.teamId) || a.teamId, category: a.category,
+      })),
+      ambiguous: plan.ambiguous.slice(0, 50).map((a) => ({
+        sport: a.sport, side: a.side, names: [...new Set(a.names)], teamIds: a.teamIds,
+      })),
+    }));
+  } catch (error) {
+    return reply.code(500).send(createResponse(0, "Erro na reconciliação do catálogo.", { error: (error as Error).message }));
   }
 };

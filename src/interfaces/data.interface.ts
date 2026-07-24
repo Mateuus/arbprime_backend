@@ -84,6 +84,63 @@ export interface SurebetData {
 }
 
 /**
+ * Odds AO VIVO de uma casa (hoje bet365), servidas cruas por esporte — o feed que
+ * alimenta a página estilo-casa. NÃO é surebet: é a cotação da própria casa, como
+ * ela mostra no in-play. Fonte: Redis `ArbBetting:Live:{Esporte}:{casa}` (evento) +
+ * `ArbBetting:Markets:Live:{Esporte}:{casa}:{fi}` (mercados, com TTL). Escrito pelo
+ * coletor WS do arbbetting_master (bet365.live.collector). Ver [[nodelay-feature]].
+ */
+export interface LiveOddSelection {
+    name: string;                 // "home" | "draw" | "away" | "over" | "under" | "1X" | ...
+    price: number | string;      // odd decimal
+    handicap?: number | string;
+    team?: string;
+    /** dado apostável (NoDelay): { selectionId, mt, odd } — presente quando a casa expõe. */
+    placeable?: unknown;
+}
+
+export interface LiveOddMarket {
+    id: string;                   // "match-winner"
+    subId: number;                // 1
+    name: string;                 // "Resultado Final"
+    nameEn?: string;
+    odds: LiveOddSelection[];
+}
+
+export interface LiveOddEvent {
+    id: string;                   // fi (id do jogo na casa)
+    sport: string;
+    bookmaker: string;
+    league: string;
+    home: string;
+    away: string;
+    /** placar ao vivo, quando a casa manda (ex.: "1-3"). */
+    score?: string;
+    /** relógio de jogo (ex.: "43:12"), quando disponível. */
+    clock?: string;
+    link?: string;
+    markets: LiveOddMarket[];
+    update_at: string;
+}
+
+/** Uma aba de esporte com a contagem de jogos ao vivo — para o menu por categoria. */
+export interface LiveSportTab {
+    sport: string;                // "Futebol"
+    events: number;               // nº de jogos ao vivo
+}
+
+export interface LiveOddsData {
+    /** esporte selecionado (o que `events` contém). */
+    sport: string;
+    /** casa (hoje só "bet365"). */
+    bookmaker: string;
+    /** abas disponíveis (todos os esportes com jogo ao vivo agora), para montar o menu. */
+    sports: LiveSportTab[];
+    /** jogos do esporte selecionado, com mercados embutidos. */
+    events: LiveOddEvent[];
+}
+
+/**
  * Value bet (aposta de valor): aposta ÚNICA, em UMA casa, cuja odd está acima da
  * odd justa estimada por uma referência (Pinnacle de-vigada ou consenso). O lucro
  * é ESPERADO, não garantido. Fonte: Redis HASH `ArbBetting:ValuebetListPrematch`

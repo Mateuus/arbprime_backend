@@ -460,7 +460,11 @@ export class SuperbetClient {
     const j = r.json;
     const ok = r.status === 200 && !!j && j.error !== true && j.data != null;
     const ticketId = j?.data?.ticketId ?? j?.data?.uuid ?? j?.data?.ticketUuid;
-    const err = !ok ? (j?.message || j?.data?.message || j?.errorMessage || `submitTicket status ${r.status}`) : undefined;
+    // Sessão expirada (errorCode sessionNotValid) → mensagem clara p/ reconectar.
+    const sessionExpired = j?.errorCode === 'sessionNotValid' || /sessão foi encerrada|faça o login/i.test(String(j?.notice || ''));
+    const err = !ok
+      ? (sessionExpired ? 'Sessão da Superbet expirada — reconecte a conta.' : (j?.notice || j?.message || j?.data?.message || j?.errorMessage || j?.errorCode || `submitTicket status ${r.status}`))
+      : undefined;
     return { ok, status: r.status, ticketId, placedOdds: Number(odd.price) || 0, stake: p.stake, error: err, raw: j ?? r.body?.slice(0, 600) };
   }
 }

@@ -144,6 +144,9 @@ export class Bet365Account {
       device: { fingerprint: this.device.fingerprint, canvasDumps: this.device.canvasDumps, syscolors: this.device.syscolors },
       clock: () => Date.now(),
       poolSize: 1,
+      // 50ms: provado byte-idêntico ao delay original e vale ~70ms por mint no tempo de aposta. Antes vinha
+      // de um default forkado no engine (o pacote existia em duas cópias); agora é explícito de quem aposta.
+      mintDelay: 50,
     });
     this.bHex = randomBytes(4).toString('hex'); // 4 bytes LE — só precisa ser consistente na sessão
   }

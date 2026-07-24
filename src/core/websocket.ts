@@ -3,7 +3,7 @@ import jwt from 'jsonwebtoken';
 import { randomUUID } from "crypto";
 import dotenv from "dotenv";
 import { logger, LoggerClass } from "@Core/logger";
-import { getFormattedSurebets, getFormattedValuebets, getFormattedMiddles, getFormattedMultiplas, getArbitragePairs, calculateArbitrage } from "@utils/functions";
+import { getFormattedSurebets, getFormattedValuebets, getFormattedMiddles, getFormattedMultiplas, getArbitragePairs, calculateArbitrage, getFormattedLiveOdds, getFormattedLiveEvent } from "@utils/functions";
 import { UserData } from "@Interfaces";
 import { getUserInstancesStatus } from "../services/betinstance/betinstance.service";
 import { primeTvSessions } from "../services/primetv/session-manager";
@@ -45,6 +45,14 @@ async function handleSingleRequest(ws: WebSocket, method: string, options: Recor
 
     if (method === "multipla") {
       data = await getFormattedMultiplas(options.type as string, options, user);
+    }
+
+    if (method === "live_odds") {
+      data = await getFormattedLiveOdds(options.type as string, options, user);
+    }
+
+    if (method === "live_event") {
+      data = await getFormattedLiveEvent(options.type as string, options, user);
     }
 
     if (method === "arbitrage_pairs") {
@@ -117,6 +125,17 @@ async function handleAutoBroadcast(method: string) {
       data = await getFormattedMultiplas(type, options, user);
     }
 
+    if (method === 'live_odds') {
+      // `type` aqui é a chave de agrupamento = o esporte (options.type). O getter usa options.sport
+      // || options.type, então cliente que manda { type: "Futebol" } recebe o feed daquele esporte.
+      data = await getFormattedLiveOdds(type, options, user);
+    }
+
+    if (method === 'live_event') {
+      // `type` = a chave de agrupamento = o eventId (options.type). Cada evento aberto é um grupo.
+      data = await getFormattedLiveEvent(type, options, user);
+    }
+
     if (method === 'arbitrage_pairs') {
       data = await getArbitragePairs(); // ainda genérico
     }
@@ -132,6 +151,13 @@ async function handleAutoBroadcast(method: string) {
         if (client.readyState === WebSocket.OPEN) {
           client.send(message);
         }
+      }
+    } else if (method === 'live_event') {
+      // Evento ao vivo que saiu do ar (jogo acabou / coletor parado): sem este aviso o cliente com
+      // autoUpdate ficaria em "Carregando…" para sempre (o broadcast normal só envia quando há data).
+      const message = JSON.stringify({ success: false, method, message: 'Evento ao vivo indisponível.' });
+      for (const client of clients) {
+        if (client.readyState === WebSocket.OPEN) client.send(message);
       }
     }
   }
@@ -298,6 +324,12 @@ export function startWebSocketServer() {
     setInterval(() => handleAutoBroadcast("valuebet"), 5000);
     setInterval(() => handleAutoBroadcast("middles"), 5000);
     setInterval(() => handleAutoBroadcast("multipla"), 5000);
+    // Live odds: push a cada 1s (o coletor grava no Redis a cada 250ms; 1s de broadcast é folgado
+    // para a vitrine e evita reenvio excessivo). O caminho crítico da detecção de surebet ao vivo
+    // NÃO passa por aqui — o matcher (Fase 2) lê o estado direto.
+    setInterval(() => handleAutoBroadcast("live_odds"), 1000);
+    // Detalhe do evento ao vivo: push a 700ms (a ficha aberta quer odd fresca).
+    setInterval(() => handleAutoBroadcast("live_event"), 700);
     setInterval(() => handleAutoBroadcast("bet_instances"), 5000);
     setInterval(() => handleAutoBroadcast("arbitrage_pairs"), 1000);
     setInterval(() => handleAutoBroadcast("monitor_pairs"), 1000);

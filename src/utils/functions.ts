@@ -3,7 +3,7 @@ import fs from 'fs';
 import dotenv from "dotenv";
 import { getRedisClient } from '@Core/redis';
 import { getExclusionSets } from '@Core/eventExclusionCache';
-import { MiddleData, MonitorOptions, MultiArbData, SurebetData, UserData, ValuebetGroup } from '@Interfaces';
+import { LiveOddEvent, LiveOddsData, LiveSportTab, MiddleData, MonitorOptions, MultiArbData, SurebetData, UserData, ValuebetGroup } from '@Interfaces';
 import stringSimilarity from "string-similarity";
 import levenshtein from "fast-levenshtein";
 dotenv.config();
@@ -364,6 +364,117 @@ export async function getFormattedValuebets(_type?: string, _options?: Record<st
  * Todos os números (ev, pGap, profitIfHit, lossIfMiss, stakePct) já vêm prontos
  * do robô; aqui NÃO recalculamos nada — só repassamos.
  */
+// Esportes que o live cobre, na ordem em que aparecem as abas. Mesmos nomes que o coletor
+// (arbbetting_master) usa nas chaves `ArbBetting:Live:{Esporte}:{casa}`.
+const LIVE_SPORTS = ['Futebol', 'Tenis', 'Basquete', 'Volei', 'Baseball'];
+const LIVE_BOOKMAKER_DEFAULT = 'bet365';
+
+/**
+ * Feed AO VIVO de uma casa, por esporte (para a página estilo-casa). Lê os eventos do esporte
+ * pedido e embute os mercados de cada jogo, e devolve também a lista de abas (esportes com jogo
+ * ao vivo agora) para o menu por categoria. Não calcula surebet — é a cotação crua da casa.
+ *
+ * options: { sport?: string (default 'Futebol'), bookmaker?: string (default 'bet365') }
+ */
+export async function getFormattedLiveOdds(_type?: string, options?: Record<string, unknown>, _user?: UserData | null): Promise<LiveOddsData> {
+  const bookmaker = (options?.bookmaker as string) || LIVE_BOOKMAKER_DEFAULT;
+  const sport = (options?.sport as string) || (options?.type as string) || 'Futebol';
+  // 'all' (ou 'Todos') = todos os esportes num payload só. É o que o feed da instância NoDelay usa:
+  // ele monta as próprias abas a partir dos jogos, então quer tudo de uma vez. A página estilo-casa
+  // pede um esporte específico e recebe só ele.
+  const wantAll = sport === 'all' || sport === 'Todos' || sport === 'todos';
+  const empty: LiveOddsData = { sport, bookmaker, sports: [], events: [] };
+  try {
+    const redisClient = getRedisClient();
+
+    // Abas: quantos jogos cada esporte tem ao vivo agora. Um pipeline de hlen (barato) evita ler
+    // o conteúdo todo só para contar. Só entram no menu os esportes que têm jogo.
+    const lenPipe = redisClient.pipeline();
+    for (const s of LIVE_SPORTS) lenPipe.hlen(`${ARB_FOLDER_BASE_RKEY}:Live:${s}:${bookmaker}`);
+    const lens = await lenPipe.exec();
+    const sports: LiveSportTab[] = LIVE_SPORTS
+      .map((s, i) => ({ sport: s, events: (lens?.[i]?.[1] as number) || 0 }))
+      .filter((t) => t.events > 0);
+
+    // Quais esportes carregar: só o pedido, ou todos que têm jogo.
+    const targetSports = wantAll ? sports.map((t) => t.sport) : [sport];
+
+    // Eventos de cada esporte alvo, todos em um pipeline (1 round-trip).
+    const evPipe = redisClient.pipeline();
+    for (const s of targetSports) evPipe.hgetall(`${ARB_FOLDER_BASE_RKEY}:Live:${s}:${bookmaker}`);
+    const evResults = await evPipe.exec();
+
+    // Achata { esporte, fi } de todos os jogos, mantendo o esporte de cada um.
+    const flat: { s: string; fi: string; ev: Record<string, unknown> }[] = [];
+    targetSports.forEach((s, i) => {
+      const evRaw = (evResults?.[i]?.[1] as Record<string, string>) || {};
+      for (const [fi, json] of Object.entries(evRaw)) flat.push({ s, fi, ev: JSON.parse(json) });
+    });
+    if (!flat.length) return { ...empty, sports };
+
+    // Mercados de cada jogo, em um pipeline só (1 round-trip para N jogos).
+    const mkPipe = redisClient.pipeline();
+    for (const { s, fi } of flat) mkPipe.hgetall(`${ARB_FOLDER_BASE_RKEY}:Markets:Live:${s}:${bookmaker}:${fi}`);
+    const mkResults = await mkPipe.exec();
+
+    const events: LiveOddEvent[] = flat.map(({ ev }, i) => {
+      const mkHash = (mkResults?.[i]?.[1] as Record<string, string>) || {};
+      const markets = Object.values(mkHash).map((j) => JSON.parse(j)).filter((m) => m?.odds?.length);
+      return {
+        id: ev.id as string, sport: ev.sport as string, bookmaker: ev.bookmaker as string, league: ev.league as string,
+        home: ev.home as string, away: ev.away as string, score: ev.score as string, clock: ev.clock as string, link: ev.link as string,
+        markets, update_at: ev.update_at as string,
+      };
+    })
+      // jogo sem mercado vivo (mercados expiraram por TTL) não vai pro cliente
+      .filter((e) => e.markets.length > 0)
+      // mais recentes primeiro
+      .sort((a, b) => (b.update_at || '').localeCompare(a.update_at || ''));
+
+    return { sport, bookmaker, sports, events };
+  } catch (error) {
+    console.error('getFormattedLiveOdds:', error);
+    return empty;
+  }
+}
+
+/**
+ * UM evento AO VIVO (bet365) com todos os mercados que temos — para a página de detalhe do jogo.
+ * O eventId (fi) não diz o esporte, então procuramos o jogo nos esportes ao vivo (pipeline de hget,
+ * 1 round-trip) e devolvemos o que existir. Retorna null se o jogo não está mais ao vivo.
+ *
+ * options: { eventId | type: string, bookmaker?: string }
+ */
+export async function getFormattedLiveEvent(_type?: string, options?: Record<string, unknown>, _user?: UserData | null): Promise<LiveOddEvent | null> {
+  const bookmaker = (options?.bookmaker as string) || LIVE_BOOKMAKER_DEFAULT;
+  const eventId = (options?.eventId as string) || (options?.type as string) || '';
+  if (!eventId) return null;
+  try {
+    const redisClient = getRedisClient();
+
+    // Acha em qual esporte o evento está (1 pipeline de hget nos esportes do live).
+    const findPipe = redisClient.pipeline();
+    for (const s of LIVE_SPORTS) findPipe.hget(`${ARB_FOLDER_BASE_RKEY}:Live:${s}:${bookmaker}`, eventId);
+    const found = await findPipe.exec();
+    const idx = (found || []).findIndex((r) => r && r[1]);
+    if (idx < 0) return null;
+
+    const sport = LIVE_SPORTS[idx];
+    const ev = JSON.parse((found![idx]![1] as string));
+    const mkHash = await redisClient.hgetall(`${ARB_FOLDER_BASE_RKEY}:Markets:Live:${sport}:${bookmaker}:${eventId}`);
+    const markets = Object.values(mkHash).map((j) => JSON.parse(j)).filter((m) => m?.odds?.length);
+
+    return {
+      id: ev.id, sport: ev.sport, bookmaker: ev.bookmaker, league: ev.league,
+      home: ev.home, away: ev.away, score: ev.score, clock: ev.clock, link: ev.link,
+      markets, update_at: ev.update_at,
+    };
+  } catch (error) {
+    console.error('getFormattedLiveEvent:', error);
+    return null;
+  }
+}
+
 export async function getFormattedMiddles(_type?: string, _options?: Record<string, unknown>, _user?: UserData | null): Promise<MiddleData[]> {
     try {
       const redisClient = getRedisClient();

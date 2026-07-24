@@ -21,6 +21,10 @@ export interface CycleSessionOpts {
   port?: number;        // porta do cycletls (o worker atribui única por instância)
   timeoutSec?: number;  // timeout por request (default 30s)
   jar?: Jar;
+  userAgent?: string;   // override do UA (default CHROME_UA). Casar com o fingerprint da casa (ex.: bet365 = Linux Chrome 145).
+  ja3?: string;         // override do JA3 (default CHROME_JA3).
+  http2Fingerprint?: string; // Akamai HTTP/2 fingerprint do Chrome (bet365 login checa isso; sem ele = soft-reject).
+  headerOrder?: string[];    // ordem dos headers (parte do fingerprint do Chrome).
 }
 
 function randomPort(): number {
@@ -31,6 +35,10 @@ export class CycleSession {
   private client: CycleTLSClient | null = null;
   private port: number;
   private timeoutSec: number;
+  private userAgent: string;
+  private ja3: string;
+  private http2Fingerprint?: string;
+  private headerOrder?: string[];
   jar: Jar;
   proxy: Proxy | null;
 
@@ -39,6 +47,10 @@ export class CycleSession {
     this.timeoutSec = opts.timeoutSec ?? 30;
     this.jar = opts.jar ?? new Jar();
     this.port = opts.port ?? randomPort();
+    this.userAgent = opts.userAgent ?? CHROME_UA;
+    this.ja3 = opts.ja3 ?? CHROME_JA3;
+    this.http2Fingerprint = opts.http2Fingerprint;
+    this.headerOrder = opts.headerOrder;
   }
 
   setProxy(p: Proxy | null): void { this.proxy = p; }
@@ -68,9 +80,11 @@ export class CycleSession {
     const res: any = await client(
       url,
       {
-        ja3: CHROME_JA3,
-        userAgent: CHROME_UA,
+        ja3: this.ja3,
+        userAgent: this.userAgent,
         headers,
+        ...(this.http2Fingerprint ? { http2Fingerprint: this.http2Fingerprint } : {}),
+        ...(this.headerOrder ? { headerOrder: this.headerOrder } : {}),
         timeout: this.timeoutSec,
         ...(this.proxy ? { proxy: proxyUrl(this.proxy) } : {}),
         ...(opts.body != null ? { body: opts.body } : {}),

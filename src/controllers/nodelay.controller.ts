@@ -6,6 +6,7 @@ import { createResponse } from '@utils';
 import { NoDelayAccountStatus } from '../enums/nodelay.enum';
 import { encryptSecret, decryptSecret, isEncryptionConfigured } from '../utils/crypto';
 import { getRogueAnonToken, getRogueLoginToken } from '../services/nodelay/rogue-token.service';
+import { getBet365LiveToken, sanitizeBrowserProfile } from '../services/bet365/live-token.service';
 import { biahostedLogin, biahostedBalance, biahostedSb2Token } from '../services/nodelay/biahosted-login.service';
 import { SuperbetClient, SuperbetMfaError, newSuperbetDevice, SuperbetDevice } from '../betbot/superbet/superbet-client';
 import { Bet365Account, Bet365Device } from '../betbot/bet365/account';
@@ -119,6 +120,30 @@ function safeDecrypt(payload: string | null): string {
     return '';
   }
 }
+
+/**
+ * Token nst da bet365 AO VIVO p/ o browser abrir o premws (zap) direto (B2). Análogo do /rogue/token:
+ * o browser recebe `101<connId>` do premws e pede o mint com esse connId; o backend minta (o nst é
+ * segredo Node) e devolve { nst, pstk }. O nst fica no backend; o streaming das odds roda no cliente.
+ */
+export const getBet365LiveTokenHandler = async (req: FastifyRequest, reply: FastifyReply) => {
+  const userId = uid(req);
+  if (!userId) return reply.code(401).send(createResponse(0, 'Não autenticado.', []));
+  // POST: uid/conId + `browser` (UA + Client Hints do navegador do usuário). O device do token TEM que
+  // casar com quem abre o WS premws, senão a bet365 aceita o handshake e derruba (close 1000). Aceita
+  // também na query (retrocompat), mas o browser vem só no body.
+  const q = (req.query || {}) as { uid?: string; conId?: string };
+  const b = (req.body || {}) as { uid?: string; conId?: string; browser?: unknown };
+  const wsUid = b.uid || q.uid;
+  const conId = b.conId || q.conId;
+  if (!wsUid) return reply.code(400).send(createResponse(0, "Parâmetro 'uid' é obrigatório.", []));
+  try {
+    const tok = await getBet365LiveToken(String(wsUid), conId ? String(conId) : undefined, sanitizeBrowserProfile(b.browser));
+    return reply.send(createResponse(1, 'Token.', tok));
+  } catch (error) {
+    return reply.code(500).send(createResponse(0, error instanceof Error ? error.message : 'Falha ao mintar token bet365 live.', []));
+  }
+};
 
 /** Guarda comum: acha a conta DO USUÁRIO (nunca confia só no :id da URL). */
 async function findOwned(req: FastifyRequest, reply: FastifyReply): Promise<NoDelayAccount | null> {

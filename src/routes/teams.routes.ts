@@ -1,7 +1,7 @@
 import { FastifyInstance } from "fastify";
 import {
   listTeams, getTeam, createTeam, updateTeam, addAlias, updateAlias, deleteAlias, mergeTeams,
-  searchSofascore, backfillSofascore
+  searchSofascore, backfillSofascore, reconcileCatalog
 } from "@Controllers";
 import { checkAuth, checkAdmin } from "../middlewares/auth.middleware";
 
@@ -16,6 +16,8 @@ export default async function teamsRoutes(app: FastifyInstance) {
   app.get("/", admin, listTeams);
   app.post("/", admin, createTeam);
   app.post("/merge", admin, mergeTeams);
+  // Reconciliação do catálogo a partir do event match (odds_events/event_groups).
+  app.post("/reconcile", admin, reconcileCatalog);
   // SoFaScore (enriquecimento do crest/logo) — estáticas ANTES de /:id.
   app.get("/sofascore/search", admin, searchSofascore);
   app.post("/sofascore/backfill", admin, backfillSofascore);

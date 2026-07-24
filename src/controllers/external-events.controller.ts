@@ -11,6 +11,7 @@ import { League } from "../database/external/league.entity";
 import { LeagueAlias } from "../database/external/league-alias.entity";
 import { getRedisClient, isRedisConnected } from "@Core/redis";
 import { normalizeName } from "@utils/functions";
+import { detectCategory } from "../services/team-reconcile.service";
 
 /**
  * Eventos vindos do banco do arbbetting_master (tabela `odds_events`), lidos via
@@ -102,6 +103,8 @@ interface GroupedEvent {
   countryKey: string | null;  // chave do país (ex.: "br"); null se não resolvido
   leagueId: string | null;
   status: string;      // 'active' | 'review' (grupos) | 'solo' (evento de 1 casa, não casado)
+  homeSofaId?: string | null;  // sofascore_id (crest) do mandante — resolvido por nome→alias
+  awaySofaId?: string | null;  // idem visitante. Ausente = sem escudo (front cai em iniciais).
   houses: GroupedHouse[];
 }
 
@@ -151,6 +154,37 @@ const memberToHouse = (m: EventGroupMember): GroupedHouse => ({
   inverted: m.orientation === "flipped",
   link: m.link
 });
+
+/**
+ * Resolve o sofascore_id (crest) de VÁRIOS times de uma vez, POR NOME, via a
+ * mesma ponte do matcher: nome → alias_norm → team_id → team_sofascore. Cobre
+ * todas as grafias (superconjunto do canonical_norm). 1 query só. Best-effort:
+ * se o banco falhar, devolve mapa vazio (a lista aparece sem escudo, não quebra).
+ * Retorno: Map com chave `${sport}|${category}|${aliasNorm}` -> sofascore_id.
+ */
+async function resolveSofaMap(pairs: Array<{ sport: string; name: string }>): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const norms = new Set<string>();
+  for (const p of pairs) { const n = normalizeName(p.name || ""); if (n) norms.add(n); }
+  if (norms.size === 0) return out;
+  const list = [...norms];
+  try {
+    const rows: Array<{ sport: string; category: string; alias_norm: string; sofascore_id: string }> =
+      await ExternalDataSource.query(
+        `SELECT a.sport, a.category, a.alias_norm, ts.sofascore_id
+           FROM team_aliases a JOIN team_sofascore ts ON ts.team_id = a.team_id
+          WHERE a.alias_norm IN (${list.map(() => "?").join(",")})`, list);
+    for (const r of rows) out.set(`${r.sport}|${r.category}|${r.alias_norm}`, String(r.sofascore_id));
+  } catch { /* best-effort: sem escudo é melhor que derrubar a lista */ }
+  return out;
+}
+
+/** Consulta o mapa de resolveSofaMap por (sport, nome cru). Mesma chave/categoria. */
+function sofaIdFor(map: Map<string, string>, sport: string, name: string): string | null {
+  const norm = normalizeName(name || "");
+  if (!norm) return null;
+  return map.get(`${sport}|${detectCategory(name)}|${norm}`) ?? null;
+}
 
 interface GroupFilters {
   sport?: string;
@@ -491,9 +525,20 @@ export const getGroupedEvents = async (req: FastifyRequest, reply: FastifyReply)
     const totalPages = Math.ceil(totalItems / limitNum);
     const pageSlice = items.slice((pageNum - 1) * limitNum, pageNum * limitNum);
 
+    // Escudo (sofascore_id) resolvido SÓ para os itens desta página — 1 query, sem
+    // N+1, sem resolver os milhares fora da página. Best-effort (mapa vazio se falhar).
+    const sofaMap = await resolveSofaMap(
+      pageSlice.flatMap((e) => [{ sport: e.sport, name: e.home }, { sport: e.sport, name: e.away }])
+    );
+    const events = pageSlice.map((e) => ({
+      ...e,
+      homeSofaId: sofaIdFor(sofaMap, e.sport, e.home),
+      awaySofaId: sofaIdFor(sofaMap, e.sport, e.away),
+    }));
+
     return reply.send(
       createResponse(1, "Eventos agrupados carregados com sucesso.", {
-        events: pageSlice,
+        events,
         pagination: {
           currentPage: pageNum,
           totalPages,
@@ -593,9 +638,10 @@ export const getEventGroup = async (req: FastifyRequest, reply: FastifyReply) =>
     let houses: GroupedHouse[];
 
     // sofascore_id (crest) do time canônico, via team_sofascore (best-effort). Resolve
-    // pelo team_id do grupo QUANDO existe; senão pelo NOME (canonical_norm) — muitos
-    // grupos não têm home_team_id/away_team_id carimbado pelo matcher, mas o time pode
-    // estar na tabela `teams` + mapeado, então o fallback por nome recupera o escudo.
+    // pelo team_id do grupo QUANDO existe; senão pelo NOME — primeiro por alias_norm
+    // (cobre todas as grafias das casas; superconjunto do canonical_norm), depois por
+    // canonical_norm. Mesma resolução que a LISTA (resolveSofaMap), p/ o escudo bater
+    // entre a lista e o detalhe. Muitos grupos não têm home_team_id/away_team_id.
     const resolveSofa = async (teamId: string | null, name: string): Promise<string | null> => {
       try {
         if (teamId) {
@@ -605,6 +651,10 @@ export const getEventGroup = async (req: FastifyRequest, reply: FastifyReply) =>
         }
         const nrm = normalizeName(name || "");
         if (!nrm) return null;
+        const ra: Array<{ sofascore_id: string }> = await ExternalDataSource.query(
+          `SELECT ts.sofascore_id FROM team_aliases a JOIN team_sofascore ts ON ts.team_id = a.team_id
+             WHERE a.alias_norm = ? AND a.sport = 'futebol' AND a.category = ? LIMIT 1`, [nrm, detectCategory(name)]);
+        if (ra[0]?.sofascore_id != null) return String(ra[0].sofascore_id);
         const r2: Array<{ sofascore_id: string }> = await ExternalDataSource.query(
           `SELECT ts.sofascore_id FROM teams t JOIN team_sofascore ts ON ts.team_id = t.id
              WHERE t.canonical_norm = ? AND t.sport = 'futebol' LIMIT 1`, [nrm]);

@@ -3,7 +3,7 @@ import {
   listNoDelayBookmakers, listNoDelayAccounts, createNoDelayAccount,
   updateNoDelayAccount, deleteNoDelayAccount, getNoDelayCredentials,
   connectNoDelayAccount, completeSuperbetMfa, getSuperbetFaceidStatus, placeNoDelayBet, placeSuperbetBet, placeBet365Bet, getAccountBetToken, saveNoDelaySession, clearNoDelaySession, setNoDelayStatus, saveNoDelayBalance,
-  listNoDelaySessions, getRogueToken, getAccountRogueToken,
+  listNoDelaySessions, getRogueToken, getAccountRogueToken, getBet365LiveTokenHandler,
   listNoDelayInstances, getNoDelayInstance, createNoDelayInstance, updateNoDelayInstance, deleteNoDelayInstance,
 } from "@Controllers";
 import { checkAuth, requireLevel } from "../middlewares/auth.middleware";
@@ -31,6 +31,9 @@ export default async function noDelayRoutes(app: FastifyInstance) {
   app.get("/bookmakers", auth, listNoDelayBookmakers);
   // Token anônimo da rogue p/ o browser ler odds ao vivo direto da casa.
   app.get("/rogue/token", auth, getRogueToken);
+  // Token nst da bet365 (zap) p/ o browser abrir o premws direto (B2). ?uid=&conId=
+  // POST: o body leva o perfil do navegador (UA + Client Hints) p/ o token casar com quem abre o WS.
+  app.post("/bet365/live-token", auth, getBet365LiveTokenHandler);
   // Tokens de todas as contas p/ o browser revalidar (botão "Atualizar").
   app.get("/sessions", auth, listNoDelaySessions);
 
