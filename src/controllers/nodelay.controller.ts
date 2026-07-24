@@ -67,9 +67,9 @@ async function getBet365DeviceForAccount(accountId: string): Promise<Bet365Devic
 async function captureBet365Trust(accountId: string, cookies: Record<string, string>): Promise<boolean> {
   const aaat = cookies['aaat']; const usdi = cookies['usdi'];
   const row = await bet365DeviceRepo().findOneBy({ accountId });
-  const line = `[bet365-device] enroll acc=${accountId} aaatIssued=${!!aaat} usdi=${!!usdi} ue=${(/[&;?]ue=([^&;]+)/i.exec(aaat || '') || [])[1] || '-'} cookies=${Object.keys(cookies).join(',')}`;
+  const line = `[bet365-device] enroll acc=${accountId} aaatIssued=${!!aaat} usdi=${!!usdi} ue=${(/[&;?]ue=([^&;]+)/i.exec(aaat || '') || [])[1] || '-'}`;
   console.log(line);
-  try { require('fs').appendFileSync('/tmp/bet365_enroll.log', new Date().toISOString() + ' ' + line + '\n'); } catch { /* */ }
+  if (process.env.BET365_DEBUG) try { require('fs').appendFileSync('/tmp/bet365_enroll.log', new Date().toISOString() + ' ' + line + ` cookies=${Object.keys(cookies).join(',')}\n`); } catch { /* */ }
   if (!aaat || !row) return false;
   const payload = (row.payload || {}) as { deviceTrust?: Record<string, string> };
   payload.deviceTrust = { ...(payload.deviceTrust || {}), aaat, ...(usdi ? { usdi } : {}) };
@@ -1179,7 +1179,7 @@ export const placeBet365Bet = async (req: FastifyRequest, reply: FastifyReply) =
         buildPlacebetBody: (resp) => buildPlacebetBody(resp, sel, stake, { acceptOddsChange: b.acceptOddsChange }),
       });
       const elapsedMs = Date.now() - started;
-      try { require('fs').appendFileSync('/tmp/bet365_timing.log', `${new Date().toISOString()} handler acc=${acc.id} devLoad=${_tDev}ms warm=${_tWarm}ms place=${elapsedMs}ms\n`); } catch { /* */ }
+      if (process.env.BET365_DEBUG) try { require('fs').appendFileSync('/tmp/bet365_timing.log', `${new Date().toISOString()} handler acc=${acc.id} devLoad=${_tDev}ms warm=${_tWarm}ms place=${elapsedMs}ms\n`); } catch { /* */ }
       const pj = (placebet && typeof placebet === 'object' ? placebet : {}) as { cs?: number; br?: string; mi?: string; bt?: Array<{ od?: string }> };
       const ok = !!pj.br || pj.cs === 1; // `br` = comprovante da aposta; cs:1 = aceito
       console.log(`[nodelay/bet365-bet] acc=${acc.id} ok=${ok} stake=${stake} bg=${(addbet as { bg?: string })?.bg ?? '-'} br=${pj.br ?? '-'} elapsed=${elapsedMs}ms`);

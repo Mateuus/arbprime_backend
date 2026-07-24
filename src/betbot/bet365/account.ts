@@ -481,7 +481,7 @@ export class Bet365Account {
       _mk('reoffer');
     }
 
-    try { require('fs').appendFileSync('/tmp/bet365_timing.log', `${new Date().toISOString()} place total=${Date.now() - _m0}ms ` + Object.entries(_t).map(([k, v]) => `${k}=${v}`).join(' ') + '\n'); } catch { /* */ }
+    if (BET365_DEBUG) try { require('fs').appendFileSync('/tmp/bet365_timing.log', `${new Date().toISOString()} place total=${Date.now() - _m0}ms ` + Object.entries(_t).map(([k, v]) => `${k}=${v}`).join(' ') + '\n'); } catch { /* */ }
     return { addbet, placebet };
   }
 
