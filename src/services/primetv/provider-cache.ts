@@ -115,9 +115,24 @@ class PrimeTvProviderCache {
   /**
    * Liga o refresh periódico (a cada 5 min) + um refresh imediato. Idempotente
    * (chamar 2x não cria 2 timers). Chamado no boot do backend.
+   *
+   * Sem `PRIMETV_PROVIDER_URL` a integração está DESATIVADA: avisa UMA vez e nem
+   * agenda o timer. Sem esse corte o refresh acordava a cada 5 min só p/ repetir o
+   * mesmo aviso — ~288 linhas/dia de ruído no stdout do pm2, na máquina que já teve
+   * incidente de disco cheio por log. Religar é repor a env + restart (que é
+   * justamente o que acontece ao repor a env).
    */
   start(): void {
     if (this.timer) return;
+    if (!this.isConfigured()) {
+      logger.log(
+        "⚠️ PrimeTV: PRIMETV_PROVIDER_URL não configurada — integração DESATIVADA (refresh periódico não agendado).",
+        LoggerClass.LogCategory.Server,
+        TAG,
+        LoggerClass.LogColor.Yellow,
+      );
+      return;
+    }
     void this.refresh();
     this.timer = setInterval(() => void this.refresh(), REFRESH_MS);
     if (typeof this.timer.unref === "function") this.timer.unref(); // não segura o processo vivo
