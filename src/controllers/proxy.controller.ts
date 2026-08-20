@@ -339,6 +339,8 @@ const TEST_TIMEOUT_MS = 12000;
  */
 async function runProxyCheck(proxy: Proxy): Promise<{
   ok: boolean;
+  state: "ok" | "saturated" | "http_error" | "dead";
+  httpStatus: number | null;
   latencyMs: number | null;
   exitIp: string | null;
   message: string;
@@ -357,22 +359,54 @@ async function runProxyCheck(proxy: Proxy): Promise<{
       ? new SocksProxyAgent(`socks5://${cred}${host}:${proxy.port}`)
       : new HttpsProxyAgent(`http://${cred}${host}:${proxy.port}`);
 
+    // ⚠️ `validateStatus` é OBRIGATÓRIO aqui. Sem ele o axios LANÇA em qualquer não-2xx,
+    // e o `catch` reportava "Falhou" — fazendo um proxy VIVO porém SATURADO (429 do
+    // provedor) aparecer no painel como offline/morto. Foi o que aconteceu em 19/ago/2026:
+    // "5 proxies offline" eram 5 portas respondendo `429 Too Many Connections` em ~14ms.
+    // Saturado ≠ morto: o primeiro volta sozinho quando a frota alivia, o segundo precisa
+    // de ação no provedor. O teste tem de saber diferenciar os dois.
     const response = await axios.get(TEST_TARGET_URL, {
       httpAgent: agent,
       httpsAgent: agent,
       proxy: false,
       timeout: TEST_TIMEOUT_MS,
-      responseType: "text"
+      responseType: "text",
+      validateStatus: () => true
     });
 
     const latencyMs = Date.now() - start;
-    const exitIp = typeof response.data === "string" ? response.data.trim() : null;
-    return { ok: true, latencyMs, exitIp, message: `OK — IP de saída ${exitIp || "?"} (${latencyMs}ms)` };
+    const status = response.status;
+
+    if (status >= 200 && status < 300) {
+      const exitIp = typeof response.data === "string" ? response.data.trim() : null;
+      return {
+        ok: true, state: "ok", httpStatus: status, latencyMs, exitIp,
+        message: `OK — IP de saída ${exitIp || "?"} (${latencyMs}ms)`
+      };
+    }
+
+    // 429 = o PROVEDOR recusou por concorrência (teto de conexões simultâneas por porta),
+    // não a rota nem o alvo. A porta está de pé e volta a servir sozinha.
+    if (status === 429) {
+      return {
+        ok: false, state: "saturated", httpStatus: status, latencyMs, exitIp: null,
+        message: `Saturado — HTTP 429 do provedor em ${latencyMs}ms. O proxy está VIVO, sem slot livre no momento.`
+      };
+    }
+
+    return {
+      ok: false, state: "http_error", httpStatus: status, latencyMs, exitIp: null,
+      message: `Respondeu HTTP ${status} (${latencyMs}ms) — proxy alcançável, resposta inesperada.`
+    };
   } catch (error) {
+    // Só chega aqui quem NÃO respondeu: DNS, TCP, CONNECT recusado, TLS ou timeout.
     const latencyMs = Date.now() - start;
     const err = error as { code?: string; message?: string };
     const reason = err.code === "ECONNABORTED" ? "timeout" : err.code || err.message || "falha na conexão";
-    return { ok: false, latencyMs, exitIp: null, message: `Falhou — ${reason} (${latencyMs}ms)` };
+    return {
+      ok: false, state: "dead", httpStatus: null, latencyMs, exitIp: null,
+      message: `Sem conexão — ${reason} (${latencyMs}ms)`
+    };
   }
 }
 
