@@ -42,8 +42,9 @@ interface CrawlerStatus {
   status: string;       // status cru do ciclo ("Finalizado", etc.)
   events: number;       // nº de eventos buscados no último ciclo
   durationMs: number;   // duração do último ciclo (ms)
-  date: string | null;  // ISO do fim do último ciclo
-  ageSeconds: number | null; // idade do report (segundos) no momento da resposta
+  date: string | null;  // ISO do fim do último ciclo CONCLUÍDO (base da saúde)
+  lastActivity: string | null; // ISO da última escrita do coletor, qualquer status
+  ageSeconds: number | null; // idade do último ciclo concluído (segundos) na resposta
   health: Health;       // online | stale | offline
 }
 
@@ -87,7 +88,7 @@ export const getCrawlersStatus = async (req: FastifyRequest, reply: FastifyReply
 
     const crawlers: CrawlerStatus[] = Object.entries(raw)
       .map(([field, json]): CrawlerStatus | null => {
-        let parsed: { status?: string; eventos?: number; date?: string; duration?: number };
+        let parsed: { status?: string; eventos?: number; date?: string; duration?: number; lastSuccess?: string | null };
         try {
           parsed = JSON.parse(json);
         } catch {
@@ -101,7 +102,14 @@ export const getCrawlersStatus = async (req: FastifyRequest, reply: FastifyReply
         const bookmaker = idx >= 0 ? field.slice(0, idx) : field;
         const sport = idx >= 0 ? field.slice(idx + 1) : "";
 
-        const dateStr = parsed.date || null;
+        // A saúde vem do último ciclo CONCLUÍDO (`lastSuccess`, gravado pelo
+        // updateBookData do master), não do `date`. O `date` é renovado a cada
+        // "Buscando": em 11/set/2026 coletores em loop de kill do pm2 reiniciavam a
+        // cada ~30s e apareciam aqui como "ciclo 0 min" com odds de 4h. Registro sem
+        // o campo vem de coletor ainda não atualizado e cai no `date`, como antes.
+        // `lastSuccess: null` = nunca concluiu um ciclo → sem data → offline.
+        const lastActivity = parsed.date || null;
+        const dateStr = "lastSuccess" in parsed ? parsed.lastSuccess || null : lastActivity;
         const ts = dateStr ? new Date(dateStr).getTime() : NaN;
         const ageSeconds = Number.isFinite(ts) ? Math.max(0, Math.round((now - ts) / 1000)) : null;
 
@@ -119,6 +127,7 @@ export const getCrawlersStatus = async (req: FastifyRequest, reply: FastifyReply
           events: Number(parsed.eventos) || 0,
           durationMs: Number(parsed.duration) || 0,
           date: dateStr,
+          lastActivity,
           ageSeconds,
           health: healthFor(ageSeconds, staleSeconds, offlineSeconds)
         };
@@ -139,7 +148,11 @@ export const getCrawlersStatus = async (req: FastifyRequest, reply: FastifyReply
       totalEvents: crawlers.reduce((acc, c) => acc + c.events, 0),
       sports: Array.from(new Set(crawlers.map((c) => c.sport).filter(Boolean))).sort(),
       // Report mais recente entre todos os coletores (referência de "última atividade").
-      lastUpdate: crawlers.find((c) => c.date)?.date ?? null
+      lastUpdate: crawlers
+        .map((c) => c.lastActivity)
+        .filter((d): d is string => !!d)
+        .sort()
+        .pop() ?? null
     };
 
     return reply.send(
