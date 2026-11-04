@@ -256,7 +256,13 @@ export const getUserFilters = async (req: FastifyRequest, reply: FastifyReply) =
   const userId = req.userData?.userId;
 
   try {
-    const filters = await abFilterRepository.find({ where: { userId } });
+    let filters = await abFilterRepository.find({ where: { userId }, order: { createdAt: 'ASC' } });
+    // Todo usuário tem ao menos um filtro próprio: sem nenhum, cria o "Padrão".
+    if (!filters.length && userId) {
+      const def = abFilterRepository.create({ name: 'Padrão', userId });
+      await abFilterRepository.save(def);
+      filters = [def];
+    }
     return reply.send(createResponse(1, 'Filtros carregados com sucesso.', filters));
   } catch (error) {
     return reply.code(500).send(createResponse(0, 'Erro ao buscar filtros.', { error }));
@@ -329,5 +335,40 @@ export const deleteFilter = async (req: FastifyRequest, reply: FastifyReply) => 
     return reply.send(createResponse(1, 'Filtro excluído com sucesso.', []));
   } catch (error) {
     return reply.code(500).send(createResponse(0, 'Erro ao excluir filtro.', { error }));
+  }
+};
+
+// Página → filtro escolhido (persistido no usuário, não no aparelho).
+export const getFilterSelections = async (req: FastifyRequest, reply: FastifyReply) => {
+  const userId = req.userData?.userId;
+  try {
+    const user = await AppDataSource.getRepository(User)
+      .createQueryBuilder('u').addSelect('u.filterSelections').where('u.id = :userId', { userId }).getOne();
+    return reply.send(createResponse(1, 'Seleções carregadas.', user?.filterSelections || {}));
+  } catch (error) {
+    return reply.code(500).send(createResponse(0, 'Erro ao buscar seleções.', { error }));
+  }
+};
+
+export const setFilterSelection = async (req: FastifyRequest, reply: FastifyReply) => {
+  const userId = req.userData?.userId;
+  const { page, filterId } = (req.body || {}) as { page?: unknown; filterId?: unknown };
+  if (typeof page !== 'string' || !/^[a-z0-9:_-]{1,40}$/i.test(page) || (filterId != null && typeof filterId !== 'string' && typeof filterId !== 'number')) {
+    return reply.code(400).send(createResponse(0, 'Parâmetros inválidos.', []));
+  }
+  const fid = filterId == null ? '' : String(filterId);
+  try {
+    if (fid) {
+      const owns = await abFilterRepository.findOneBy({ id: fid, userId });
+      if (!owns) return reply.code(404).send(createResponse(0, 'Filtro não encontrado.', []));
+    }
+    const repo = AppDataSource.getRepository(User);
+    const user = await repo.createQueryBuilder('u').addSelect('u.filterSelections').where('u.id = :userId', { userId }).getOne();
+    if (!user) return reply.code(404).send(createResponse(0, 'Usuário não encontrado.', []));
+    const next = { ...(user.filterSelections || {}), [page]: fid };
+    await repo.update({ id: user.id }, { filterSelections: next });
+    return reply.send(createResponse(1, 'Seleção salva.', next));
+  } catch (error) {
+    return reply.code(500).send(createResponse(0, 'Erro ao salvar seleção.', { error }));
   }
 };

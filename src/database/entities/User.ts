@@ -55,4 +55,9 @@ export class User {
 
     @Column({ type: 'timestamp', nullable: true })
     discordLinkedAt!: Date | null;
+
+    // Filtro salvo (ABFilter) escolhido em cada página: { "arbbets:prematch": "12", ... }.
+    // "" = usuário escolheu explicitamente "Sem filtro". Persiste entre aparelhos/recargas.
+    @Column({ type: 'json', nullable: true, select: false })
+    filterSelections!: Record<string, string> | null;
 }

@@ -1,5 +1,5 @@
 import { FastifyInstance } from "fastify";
-import { registerUser, loginUser, logoutAccount, getUserInfo, getUserAuth, changePassword, getUserFilters, getFilterById, createFilter, updateFilter, deleteFilter } from "@Controllers";
+import { registerUser, loginUser, logoutAccount, getUserInfo, getUserAuth, changePassword, getUserFilters, getFilterById, createFilter, updateFilter, deleteFilter, getFilterSelections, setFilterSelection } from "@Controllers";
 import { checkAuth } from "../middlewares/auth.middleware";
 
 export default async function userRoutes(app: FastifyInstance) {
@@ -11,6 +11,8 @@ export default async function userRoutes(app: FastifyInstance) {
   app.put("/change-password", { preHandler: checkAuth }, changePassword);
 
   app.get("/abfilters", { preHandler: checkAuth }, getUserFilters);
+  app.get("/abfilters/selection", { preHandler: checkAuth }, getFilterSelections);
+  app.put("/abfilters/selection", { preHandler: checkAuth }, setFilterSelection);
   app.get("/abfilters/:id", { preHandler: checkAuth }, getFilterById);
   app.post("/abfilters", { preHandler: checkAuth }, createFilter);
   app.put("/abfilters/:id", { preHandler: checkAuth }, updateFilter);
